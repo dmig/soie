@@ -1337,6 +1337,8 @@ int soie_layout_document(soie_node *doc, int width, int height)
 	 * (styledb_free() clears them), the fonts too (fonts_drop_*) */
 	font_doc = doc;
 	damage_before(doc);
+	if (old)
+		stick_undo(old);
 	old_tree = old && old->rules == l->rules ? old : NULL;
 	new_tree = l;
 	nctrs = clevel = counters_seen = 0;
@@ -1352,8 +1354,23 @@ int soie_layout_document(soie_node *doc, int width, int height)
 	doc->u.doc->layout = l;
 	doc->u.doc->lay_w = (int)l->width;
 	doc->u.doc->lay_h = (int)l->height;
+	stick_apply(doc, l, 0);
 	damage_after(doc);
 	return 0;
+}
+
+void soie_layout_scroll(soie_node *doc, float sx, float sy)
+{
+	struct layout *l;
+
+	if (doc->type != SOIE_DOCUMENT || (doc->u.doc->scroll_x == sx &&
+	    doc->u.doc->scroll_y == sy))
+		return;
+	doc->u.doc->scroll_x = sx;
+	doc->u.doc->scroll_y = sy;
+	l = doc->u.doc->layout;
+	if (l && l->root)
+		stick_apply(doc, l, 1);
 }
 
 float soie_layout_height(const soie_node *doc)

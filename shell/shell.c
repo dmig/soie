@@ -925,6 +925,13 @@ static void layout_done(struct shell *s)
 	s->sel.n = -1;
 }
 
+/* The engine follows the view: position: sticky boxes move with it */
+static void stick(struct shell *s)
+{
+	if (s->page.doc)
+		soie_layout_scroll(s->page.doc, 0, (float)s->page.scroll);
+}
+
 static void clamp_scroll(struct shell *s)
 {
 	int max = (int)s->page.height - s->view_h;
@@ -933,6 +940,7 @@ static void clamp_scroll(struct shell *s)
 		s->page.scroll = max;
 	if (s->page.scroll < 0)
 		s->page.scroll = 0;
+	stick(s);
 }
 /* Navigation */
 
@@ -3776,6 +3784,7 @@ void shell_paint(struct shell *s, unsigned char *rgba, int stride)
 {
 	float r[4];
 
+	stick(s);
 	s->painted = paint_view(s, rgba, stride, 0, 0, s->view_w, s->view_h);
 	s->painted_scroll = s->page.scroll;
 	s->painted_gen = s->painted ? soie_document_generation(s->painted) : 0;
@@ -3793,6 +3802,7 @@ int shell_paint_changed(struct shell *s, unsigned char *rgba, int stride,
 	float f[4 * 32];
 	int n, i, k = 0;
 
+	stick(s);
 	/* room for the list's rect */
 	if (s->damage_full || !s->page.doc || s->painted != s->page.doc ||
 	    s->painted_scroll != s->page.scroll || max > 32 || max < 2 ||
@@ -3845,8 +3855,9 @@ static int page_changed(struct shell *s)
 int shell_paint_scroll(struct shell *s, unsigned char *rgba, int stride,
 	int *dy)
 {
-	int d = s->page.scroll - s->painted_scroll, y;
+	int d = s->page.scroll - s->painted_scroll, y, n, i;
 	size_t row = (size_t)s->view_w * 4;
+	float f[4 * 8];
 
 	*dy = 0;
 	/* the list opened, changed or closed: its pixels are not the
@@ -3858,6 +3869,11 @@ int shell_paint_scroll(struct shell *s, unsigned char *rgba, int stride,
 		return 1;
 	if (d >= s->view_h || -d >= s->view_h)
 		return 0;
+	/* sticky boxes moved in the page to stay in the view: where they
+	 * were and where they are is painted again, over the moved pixels */
+	stick(s);
+	if ((n = soie_layout_damage(s->page.doc, f, 8)) < 0)
+		return 0;
 	if (d > 0) {
 		for (y = 0; y < s->view_h - d; y++)
 			memmove(rgba + (size_t)y * (size_t)stride, rgba +
@@ -3868,6 +3884,16 @@ int shell_paint_scroll(struct shell *s, unsigned char *rgba, int stride,
 			memmove(rgba + (size_t)y * (size_t)stride, rgba +
 				(size_t)(y + d) * (size_t)stride, row);
 		paint_view(s, rgba, stride, 0, 0, s->view_w, -d);
+	}
+	for (i = 0; i < n; i++) {
+		int y0 = (int)floorf(f[i * 4 + 1]) - s->page.scroll;
+		int y1 = (int)ceilf(f[i * 4 + 1] + f[i * 4 + 3]) -
+			s->page.scroll;
+
+		y0 = y0 < 0 ? 0 : y0;
+		y1 = y1 > s->view_h ? s->view_h : y1;
+		if (y0 < y1)
+			paint_view(s, rgba, stride, 0, y0, s->view_w, y1 - y0);
 	}
 	s->painted_scroll = s->page.scroll;
 	*dy = d;
@@ -4318,8 +4344,18 @@ void shell_go(struct shell *s, const char *typed)
 	if (strstr(v, "://") || !strncmp(v, "about:", 6)) {
 		url = strdup(v);
 	} else if (v[0] == '/') {
-		url = malloc(n + 8);
-		sprintf(url, "file://%s", v);
+		/* a path, not a URL: its #, ? and % are the file's name */
+		char *o;
+
+		url = malloc(3 * n + 8);
+		o = url + sprintf(url, "file://");
+		for (pc = v; *pc; pc++) {
+			if (*pc == '#' || *pc == '?' || *pc == '%')
+				o += sprintf(o, "%%%02X", *pc);
+			else
+				*o++ = *pc;
+		}
+		*o = 0;
 	} else if (!strchr(v, ' ') && (strchr(v, '.') || strchr(v, ':') ||
 		   !strcmp(v, "localhost"))) {
 		url = malloc(n + 9);

@@ -343,6 +343,13 @@ void damage_after(soie_node *doc)
 	table_free(&now);
 }
 
+/* A rect to paint again, x0 y0 x1 y1 (a sticky box moved) */
+void damage_rect(soie_node *doc, const float *r)
+{
+	if (doc->u.doc->damage)
+		add(doc->u.doc->damage, r);
+}
+
 /* An element's box painted again (the focus moved, its caret) */
 void damage_node(soie_node *doc, const soie_node *el)
 {

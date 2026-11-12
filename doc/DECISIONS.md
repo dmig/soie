@@ -610,7 +610,7 @@ reversed, edit the entry and say why; do not leave stale rules here.
   and the layout tests compare that dump.
 - Known simplifications: a float before a block whose top margin
   collapses through its parent stays above the collapsed margin
-  instead of moving down with it; sticky is static; vertical margins of
+  instead of moving down with it; vertical margins of
   floats do not collapse (as specified), but clearance is computed
   the simple way (move below the floats).
 - Box tree depth is capped at 512 levels (layout is recursive).
@@ -1940,10 +1940,24 @@ on the same frozen DOM.
   sent (tk_show()), merged to one when more than 8.
 - Scrolling alone moves pixels: shell_paint_scroll() moves the view's
   rows and paints the band that came in. It holds because painting is
-  a translation of page coordinates (sticky is static, fixed boxes
-  stay where laid out: when they follow the view, they will need their
-  rects painted again). shell_key() returns 2 for a key that only
-  scrolled, so arrows and Page Down move pixels too.
+  a translation of page coordinates (fixed boxes stay where laid
+  out: when they follow the view, they will need their rects painted
+  again, as sticky boxes do). shell_key() returns 2 for a key that
+  only scrolled, so arrows and Page Down move pixels too.
+- position: sticky is a relative offset that depends on the scroll
+  offset, so the engine has to know it: soie_layout_scroll(), kept in
+  the document. Boxes are laid out static, then stick_apply() moves
+  the sticky ones (translate(), their subtree with them): after each
+  layout, and when the offset changes. Before a layout stick_undo()
+  puts them back, so that kept boxes are where the flow left them.
+  All geometry stays in page coordinates: hit tests, element rects
+  and painting need nothing. A box that moved gives its old and new
+  extents to the damage list; shell_paint_scroll() paints them over
+  the moved pixels. The view is the only scrollport (elements do not
+  scroll): below a box that clips, sticky is static, which is what
+  browsers show when that box does not scroll. The containing block
+  is the parent box, the table for a table's parts. Not for inline
+  boxes.
 - What tells that the page changed: shell_tick()'s repaint, and the
   document generation at the last full paint. Scripts lay out the page
   themselves (getBoundingClientRect()), leaving no update for the

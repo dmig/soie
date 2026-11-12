@@ -901,7 +901,7 @@ static void rel_position(const struct box *b, float cbw, float *dx,
 	else if (!is_auto(st, P_BOTTOM))
 		*dy = -len_val(&st->v[P_BOTTOM], 0);
 	if (kw(st, P_POSITION, "sticky"))
-		*dx = *dy = 0;	/* sticky needs scrolling: static here */
+		*dx = *dy = 0;	/* laid out as static: stick_apply() moves it */
 }
 
 /* Form controls, <audio> and <iframe> have a size, not a ratio: a
@@ -1954,4 +1954,143 @@ void layout_root(struct layout *l)
 	g.nsaved = g.capsaved = 0;
 	bottom = overflow_bottom(root, bottom, 1);
 	l->doc_height = bottom;
+}
+
+/*
+ * position: sticky (CSS Positioned Layout 3, 3.4). A sticky box is laid
+ * out where the flow puts it, then moved to stay inside the view, less
+ * its insets, as long as its margin box stays in its containing block.
+ * The view is the only scrollport: below a box that clips its overflow
+ * a sticky box is static, as it is in browsers when that box does not
+ * scroll. Not for inline boxes.
+ */
+
+/* What a box paints with what is below, x0 y0 x1 y1 */
+static void stick_extent(const struct box *b, float *r, int depth)
+{
+	const struct box *c;
+	float m = b->style ? shadow_reach(b->style) + 2 : 2;
+	float x0 = b->x - b->p[3] - b->b[3] - m;
+	float y0 = b->y - b->p[0] - b->b[0] - m;
+	float x1 = b->x + b->w + b->p[1] + b->b[1] + m;
+	float y1 = b->y + b->h + b->p[2] + b->b[2] + m;
+
+	r[0] = x0 < r[0] ? x0 : r[0];
+	r[1] = y0 < r[1] ? y0 : r[1];
+	r[2] = x1 > r[2] ? x1 : r[2];
+	r[3] = y1 > r[3] ? y1 : r[3];
+	if (depth < 512)
+		for (c = b->first; c; c = c->next)
+			stick_extent(c, r, depth + 1);
+}
+
+/* The offset on one axis: the box's border box from b0, n long, its
+ * margins m0 and m1, in the container's content c0 to c1; the view
+ * from v0, vn long; the insets before and after */
+static float stick_axis(const struct style *st, int before, int after,
+	float b0, float n, float m0, float m1, float c0, float c1, float v0,
+	float vn)
+{
+	float d, lim;
+
+	if (!is_auto(st, before)) {
+		d = v0 + len_val(&st->v[before], vn) - b0;
+		lim = c1 - (b0 + n + m1);
+		d = d > lim ? lim : d;
+		return d > 0 ? d : 0;
+	}
+	if (!is_auto(st, after)) {
+		d = v0 + vn - len_val(&st->v[after], vn) - (b0 + n);
+		lim = c0 - (b0 - m0);
+		d = d < lim ? lim : d;
+		return d < 0 ? d : 0;
+	}
+	return 0;
+}
+
+static int stick_box(soie_node *doc, struct layout *l, struct box *b,
+	int clipped, int damage)
+{
+	const struct box *cb = b->parent;
+	float dx = 0, dy = 0, r[4];
+
+	if (!clipped && cb) {
+		/* a table's parts: all of the table is theirs to stay in */
+		while (cb->parent && cb->role != R_TABLE && cb->role != R_NONE)
+			cb = cb->parent;
+		dx = stick_axis(b->style, P_LEFT, P_RIGHT,
+			b->x - b->p[3] - b->b[3] - b->stx,
+			b->w + b->p[1] + b->p[3] + b->b[1] + b->b[3],
+			b->m[3], b->m[1], cb->x, cb->x + cb->w,
+			doc->u.doc->scroll_x, l->width);
+		dy = stick_axis(b->style, P_TOP, P_BOTTOM,
+			b->y - b->p[0] - b->b[0] - b->sty,
+			b->h + b->p[0] + b->p[2] + b->b[0] + b->b[2],
+			b->m[0], b->m[2], cb->y, cb->y + cb->h,
+			doc->u.doc->scroll_y, l->height);
+	}
+	if (dx == b->stx && dy == b->sty)
+		return dx || dy;
+	r[0] = r[1] = 1e30f;
+	r[2] = r[3] = -1e30f;
+	if (damage)
+		stick_extent(b, r, 0);
+	translate(b, dx - b->stx, dy - b->sty);
+	b->stx = dx;
+	b->sty = dy;
+	if (damage) {
+		stick_extent(b, r, 0);
+		damage_rect(doc, r);
+	}
+	return dx || dy;
+}
+
+/* Parents first: a sticky box inside another moves with it */
+static int stick_walk(soie_node *doc, struct layout *l, struct box *b,
+	int clipped, int damage, int depth)
+{
+	struct box *c;
+	const soie_node *n = b->node;
+	int moved = 0;
+
+	if (b->style && b->type != B_INLINE && b->type != B_TEXT &&
+	    kw(b->style, P_POSITION, "sticky"))
+		moved = stick_box(doc, l, b, clipped, damage);
+	/* the root's and the body's overflow is the view's */
+	if (b->style && b->parent && !(n && n->type == SOIE_ELEMENT &&
+	    n->ns == SOIE_NS_HTML && (!strcmp(n->name, "html") ||
+	    !strcmp(n->name, "body"))) &&
+	    !kw(b->style, P_OVERFLOW_Y, "visible") &&
+	    !kw(b->style, P_OVERFLOW_Y, "clip"))
+		clipped = 1;
+	if (depth < 512)
+		for (c = b->first; c; c = c->next)
+			moved |= stick_walk(doc, l, c, clipped, damage,
+				depth + 1);
+	return moved;
+}
+
+void stick_apply(soie_node *doc, struct layout *l, int damage)
+{
+	if (l->root)
+		l->sticky = stick_walk(doc, l, l->root, 0, damage, 0);
+}
+
+static void stick_back(struct box *b, int depth)
+{
+	struct box *c;
+
+	if (b->stx || b->sty) {
+		translate(b, -b->stx, -b->sty);
+		b->stx = b->sty = 0;
+	}
+	if (depth < 512)
+		for (c = b->first; c; c = c->next)
+			stick_back(c, depth + 1);
+}
+
+void stick_undo(struct layout *l)
+{
+	if (l->sticky && l->root)
+		stick_back(l->root, 0);
 }

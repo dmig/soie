@@ -890,13 +890,35 @@ static int brotli_body(struct response *r)
 }
 #endif
 
+static int hexval(int c)
+{
+	return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ?
+		c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+/* The path of a file:// URL: without its query and fragment (a local
+ * page opened at #anchor is the same file), percent-decoded */
 static int fetch_file(const char *url, struct response *r)
 {
-	FILE *f = fopen(url + 7, "rb");
+	char path[4096];
+	FILE *f;
 	struct stat st;
 	char buf[16384];
-	size_t k;
+	size_t k, n = 0;
+	const char *p;
 
+	for (p = url + 7; *p && *p != '#' && *p != '?' &&
+	     n < sizeof(path) - 1; p++) {
+		if (*p == '%' && hexval(p[1]) >= 0 && hexval(p[2]) >= 0 &&
+		    (hexval(p[1]) || hexval(p[2]))) {
+			path[n++] = (char)(hexval(p[1]) * 16 + hexval(p[2]));
+			p += 2;
+		} else {
+			path[n++] = *p;
+		}
+	}
+	path[n] = 0;
+	f = fopen(path, "rb");
 	if (!f) {
 		set_error(r, strerror(errno));
 		return -1;
@@ -912,25 +934,15 @@ static int fetch_file(const char *url, struct response *r)
 		add(r, buf, k);
 	fclose(f);
 	r->status = 200;
-	{
-		size_t n = strlen(url);
-
-		if (n > 5 && !strcasecmp(url + n - 5, ".html"))
-			strcpy(r->type, "text/html");
-		else if (n > 4 && !strcasecmp(url + n - 4, ".htm"))
-			strcpy(r->type, "text/html");
-		else if (n > 4 && !strcasecmp(url + n - 4, ".css"))
-			strcpy(r->type, "text/css");
-		else if (n > 4 && !strcasecmp(url + n - 4, ".txt"))
-			strcpy(r->type, "text/plain");
-	}
+	if (n > 5 && !strcasecmp(path + n - 5, ".html"))
+		strcpy(r->type, "text/html");
+	else if (n > 4 && !strcasecmp(path + n - 4, ".htm"))
+		strcpy(r->type, "text/html");
+	else if (n > 4 && !strcasecmp(path + n - 4, ".css"))
+		strcpy(r->type, "text/css");
+	else if (n > 4 && !strcasecmp(path + n - 4, ".txt"))
+		strcpy(r->type, "text/plain");
 	return 0;
-}
-
-static int hexval(int c)
-{
-	return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ?
-		c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
 }
 
 /*

@@ -78,6 +78,7 @@ struct docinfo {
 	/* layout_touch() stamps, and the last layout's */
 	unsigned long lstamp, lbuilt;
 	struct damage *damage;	/* soie_layout_damage() */
+	float scroll_x, scroll_y;	/* soie_layout_scroll() */
 	float zoom;		/* the style options', 1 */
 	int shadows;		/* shadow roots made: 0, no shadow work */
 	struct shadow_css *css;	/* adopted sheets of its shadow roots */

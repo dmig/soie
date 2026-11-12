@@ -162,11 +162,18 @@ static int run_one(const char *file, int num, char *s, char *end,
 
 		if (lay) {
 			int w = 800;
+			const char *sc, *q;
 
 			if (!strncmp(lay, "width=", 6))
 				w = atoi(lay + 6);
 			soie_style_document(doc, NULL);
 			soie_layout_document(doc, w, 600);
+			/* "width=200 scroll=50": the view scrolled down,
+			 * for position: sticky */
+			if (!strncmp(lay, "width=", 6) && (sc = memchr(lay,
+			    '\n', (size_t)(end - lay))) &&
+			    (q = strstr(lay, " scroll=")) && q < sc)
+				soie_layout_scroll(doc, 0, (float)atoi(q + 8));
 			got = soie_layout_dump(doc, &got_len);
 		} else if (props) {
 			size_t n = section_len(props, end);

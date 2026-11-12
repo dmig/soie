@@ -103,6 +103,7 @@ struct box {
 	float lx, ly;		/* where its content was, translate() too */
 	unsigned abs_pass;	/* in the absolute boxes of that layout */
 	float sx, sy;		/* an absolute box's static position */
+	float stx, sty;		/* position: sticky, how far it is moved */
 	/* in a flex or grid container: the static position rectangle
 	 * from sx, sy, and the box's alignment in it, x then y ('f'
 	 * start, 'c' center, 'e' end); sw < 0 for none */
@@ -128,12 +129,14 @@ struct layout {
 	unsigned long rules;	/* style_serial() of its styles */
 	int counters;		/* it has CSS counters: no box is kept from
 				 * it, a number may depend on any element */
+	int sticky;		/* boxes moved by position: sticky */
 };
 
 /* damage.c: around a layout, the focus moved, the document freed */
 void damage_before(soie_node *doc);
 void damage_after(soie_node *doc);
 void damage_node(soie_node *doc, const soie_node *el);
+void damage_rect(soie_node *doc, const float *r);
 
 /* boxes.c */
 struct box *box_new(int type, const struct style *st, soie_node *node);
@@ -160,6 +163,11 @@ float shadow_reach(const struct style *st);
 struct bfc;
 void layout_root(struct layout *l);
 void translate(struct box *b, float dx, float dy);
+/* position: sticky: back where the flow left the boxes, before a
+ * layout; moved for the document's scroll offset after it, and when the
+ * offset changes (damage set: what moved is to paint again) */
+void stick_undo(struct layout *l);
+void stick_apply(soie_node *doc, struct layout *l, int damage);
 /* The same for a box moved with the flow it is in (static positions) */
 void translate_flow(struct box *b, float dx, float dy);
 void box_sizes(struct box *b, float *min, float *max);

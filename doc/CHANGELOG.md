@@ -7,6 +7,21 @@ each change are in [DECISIONS.md](DECISIONS.md).
 
 ## [Unreleased]
 
+### Added
+- `position: sticky`: a sticky box stays in the view while its
+  container is there (headers and bars that follow the page, table
+  headers), with `top`, `bottom`, `left` and `right`. It was laid out
+  as a static box and scrolled away. The view is the only scrollport:
+  inside a box that clips its overflow, a sticky box stays static.
+  Library: `soie_layout_scroll()` tells the engine the host's scroll
+  offset.
+
+### Fixed
+- A local file opened at an anchor (`file:///page.html#part`) or with
+  a query was not found: the fragment was taken for the file's name.
+  Percent escapes in `file://` URLs are decoded, and a path typed with
+  a `#`, `?` or `%` in it opens that file.
+
 ## [0.1.6] - 2026-11-11
 
 ### Added
