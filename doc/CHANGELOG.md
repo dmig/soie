@@ -15,6 +15,9 @@ each change are in [DECISIONS.md](DECISIONS.md).
   inside a box that clips its overflow, a sticky box stays static.
   Library: `soie_layout_scroll()` tells the engine the host's scroll
   offset.
+- `position: fixed` follows the view: bars, menus and buttons fixed
+  to the window stay there while the page scrolls. They scrolled away
+  with the page.
 
 ### Fixed
 - A local file opened at an anchor (`file:///page.html#part`) or with

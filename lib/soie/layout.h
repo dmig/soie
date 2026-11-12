@@ -29,7 +29,7 @@ int soie_document_update(soie_node *doc);
 
 /*
  * The host's scroll offset, the page point at the view's top left
- * corner: position: sticky boxes follow it. To call when it changes,
+ * corner: sticky and fixed boxes follow it. To call when it changes,
  * before painting; what moved is in soie_layout_damage(). Layouts keep
  * the offset.
  */

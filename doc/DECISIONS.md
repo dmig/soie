@@ -1940,10 +1940,10 @@ on the same frozen DOM.
   sent (tk_show()), merged to one when more than 8.
 - Scrolling alone moves pixels: shell_paint_scroll() moves the view's
   rows and paints the band that came in. It holds because painting is
-  a translation of page coordinates (fixed boxes stay where laid
-  out: when they follow the view, they will need their rects painted
-  again, as sticky boxes do). shell_key() returns 2 for a key that
-  only scrolled, so arrows and Page Down move pixels too.
+  a translation of page coordinates (sticky and fixed boxes, which
+  move in the page, have their rects painted again). shell_key()
+  returns 2 for a key that only scrolled, so arrows and Page Down
+  move pixels too.
 - position: sticky is a relative offset that depends on the scroll
   offset, so the engine has to know it: soie_layout_scroll(), kept in
   the document. Boxes are laid out static, then stick_apply() moves
@@ -1958,6 +1958,12 @@ on the same frozen DOM.
   browsers show when that box does not scroll. The containing block
   is the parent box, the table for a table's parts. Not for inline
   boxes.
+- position: fixed moves the same way. A fixed box is laid out in the
+  view at the top of the page; stick_apply() adds the scroll offset,
+  less what its ancestors already moved (a menu inside a sticky
+  header). One held by a transformed ancestor stays with it. A fixed
+  box as high as the view has all of it painted again at each scroll:
+  right before fast.
 - What tells that the page changed: shell_tick()'s repaint, and the
   document generation at the last full paint. Scripts lay out the page
   themselves (getBoundingClientRect()), leaving no update for the
