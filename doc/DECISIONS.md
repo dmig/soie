@@ -2997,11 +2997,16 @@ run again):
   66 %, grid 51 %. Same soname, extension ABI and public API. The
   packages need libbrotli; without it at build time the engine is
   the same, less br.
+- 0.1.7 (2026-11-14): the SliTaz sites got a header that stays on
+  top, and Soie let it scroll away. position: sticky and fixed follow
+  the view, file:// URLs take a fragment or a query. Same soname and
+  extension ABI; one public function added (soie/layout.h):
+  soie_layout_scroll().
 - The site's figures are rounded so that they stay true across
   releases: "under 50,000 lines of code" (tools/loc.sh: 45,503 in
   0.1.2, 47,548 in 0.1.3, 51,661 in 0.1.4, 53,444 in 0.1.5, 54,517
-  in 0.1.6: "under 50,000" became "under 55,000"; "about 45,000" was
-  out of date one release later). At each release, check them all the
+  in 0.1.6, 54,709 in 0.1.7: "under 50,000" became "under 55,000";
+  "about 45,000" was out of date one release later). At each release, check them all the
   same: tools/loc.sh, the WPT percentages (tests/wpt/run.sh; the site
   said 44 and 23 % until 0.1.3, when they were 62 and 46), the
   download size (soie and xsoie packages: 725 KB in 0.1.3, 773 KB in

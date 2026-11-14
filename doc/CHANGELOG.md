@@ -7,6 +7,8 @@ each change are in [DECISIONS.md](DECISIONS.md).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-14
+
 ### Added
 - `position: sticky`: a sticky box stays in the view while its
   container is there (headers and bars that follow the page, table
@@ -420,6 +422,7 @@ each change are in [DECISIONS.md](DECISIONS.md).
 - Browsers: xsoie (X11), wsoie (Wayland), SoieView (GTK 3 widget).
 - soie-render, a headless renderer for tests and screenshots.
 
+[0.1.7]: https://hg.slitaz.org/soie/rev/0.1.7
 [0.1.6]: https://hg.slitaz.org/soie/rev/0.1.6
 [0.1.5]: https://hg.slitaz.org/soie/rev/0.1.5
 [0.1.4]: https://hg.slitaz.org/soie/rev/0.1.4
