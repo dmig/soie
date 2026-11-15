@@ -743,10 +743,10 @@ static gboolean key_press(GtkWidget *w, GdkEventKey *e)
 	}
 	if (!(k = key_name(e->keyval, buf, sizeof(buf))))
 		return FALSE;
-	/* shortcuts type nothing; what the page does not take goes on
-	 * to the window (its accelerators) */
-	return key(v, k, mods & (SOIE_MOD_CTRL | SOIE_MOD_ALT |
-		SOIE_MOD_META) ? "" : k, mods) != 0;
+	/* shortcuts and named keys (Tab, Shift, F1...) type nothing; what
+	 * the page does not take goes on to the window (its accelerators) */
+	return key(v, k, *g_utf8_next_char(k) || (mods & (SOIE_MOD_CTRL |
+		SOIE_MOD_ALT | SOIE_MOD_META)) ? "" : k, mods) != 0;
 }
 
 static gboolean key_release(GtkWidget *w, GdkEventKey *e)

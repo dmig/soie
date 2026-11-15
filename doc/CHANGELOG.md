@@ -7,6 +7,11 @@ each change are in [DECISIONS.md](DECISIONS.md).
 
 ## [Unreleased]
 
+### Fixed
+- GTK view (Toile, gsoie): Tab, Shift, Control, Alt, Caps Lock and
+  F1-F12 pressed in a text field typed their names ("TabShift").
+  Named keys now type nothing; pages still see them in `keydown`.
+
 ## [0.1.7] - 2026-11-14
 
 ### Added
