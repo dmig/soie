@@ -11,6 +11,12 @@ each change are in [DECISIONS.md](DECISIONS.md).
 - GTK view (Toile, gsoie): Tab, Shift, Control, Alt, Caps Lock and
   F1-F12 pressed in a text field typed their names ("TabShift").
   Named keys now type nothing; pages still see them in `keydown`.
+- GTK view: the caret of a text field did not move on screen with the
+  arrow keys, Home and End (the text went in the right place).
+- `<textarea>`: what was typed was not its `value` for scripts nor in
+  `FormData` (DuckDuckGo's search box, a textarea, sent an empty
+  query: Enter did nothing). A textarea already filled lost its text
+  at the first key, and a value over 16 KB was cut when edited.
 
 ## [0.1.7] - 2026-11-14
 

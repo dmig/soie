@@ -3044,8 +3044,13 @@ reflect(HTMLInputElement, ['disabled', 'required', 'readOnly', 'multiple',
 reflect(HTMLInputElement, ['size', 'maxLength', 'minLength'], 'int');
 html('HTMLTextAreaElement', ['textarea'], (B) => class extends formControl(B) {
 	get type() { return 'textarea'; }
-	get value() { return this.textContent; }
-	set value(v) { this.textContent = v === null ? '' : str(v); }
+	/* the value typed or set lives in the value attribute, as the
+	 * shell and the engine keep it; the text inside is the default */
+	get value() {
+		const v = api.getAttr(this, 'value');
+		return v === null ? this.textContent : v;
+	}
+	set value(v) { api.setAttr(this, 'value', v === null ? '' : str(v)); }
 	get defaultValue() { return this.textContent; }
 	set defaultValue(v) { this.textContent = v; }
 	get textLength() { return this.value.length; }

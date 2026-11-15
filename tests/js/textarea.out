@@ -1,0 +1,5 @@
+log: start hello hello 5
+log: typed typed hello typed
+log: set set hello hello
+log: default set other
+log: reset other other

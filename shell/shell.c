@@ -505,6 +505,27 @@ static void text_of(soie_node *n, char *out, size_t size)
 	}
 }
 
+/* A text field's value, kept in its value attribute: a <textarea> not
+ * edited yet starts from the text inside it */
+static const char *field_value(soie_node *el)
+{
+	const char *v = soie_element_get_attr(el, "value");
+
+	if (!v && !strcmp(soie_element_name(el), "textarea")) {
+		size_t max = 4 << 20;
+		char *t = malloc(max);
+
+		if (!t)
+			abort();
+		*t = '\0';
+		text_of(el, t, max);
+		soie_element_set_attr(el, "value", t);
+		free(t);
+		v = soie_element_get_attr(el, "value");
+	}
+	return v ? v : "";
+}
+
 /* The node above n on an event's way (DOM "get the parent"): the slot
  * that shows it, else its parent, the host for a shadow root */
 static soie_node *up(soie_node *n)
@@ -3068,9 +3089,7 @@ static void click(struct shell *s, int x, int y, int mods)
 			return;
 	}
 	if (is_text_control(n)) {
-		const char *v = soie_element_get_attr(n, "value");
-
-		set_page_focus(s, n, v ? (int)strlen(v) : 0);
+		set_page_focus(s, n, (int)strlen(field_value(n)));
 		return;
 	}
 	if (is_dropdown(n) && !soie_element_get_attr(n, "disabled")) {
@@ -3153,33 +3172,38 @@ void shell_click(struct shell *s, int x, int y, int mods)
 
 int shell_edit(soie_node *el, int *cp, const char *key, const char *text)
 {
-	const char *v = soie_element_get_attr(el, "value");
-	char buf[16384];
-	size_t len = v ? strlen(v) : 0, n = text ? strlen(text) : 0;
-	int c = *cp;
+	const char *v = field_value(el);
+	size_t len = strlen(v), n = text ? strlen(text) : 0;
+	char *buf = malloc(len + n + 1);
+	int c = *cp, done = 1;
 
-	if (!v)
-		v = "";
+	if (!buf)
+		abort();
 	if (c > (int)len)
 		c = (int)len;
-	snprintf(buf, sizeof(buf), "%s", v);
+	memcpy(buf, v, len + 1);
 	if (!strcmp(key, "Backspace")) {
 		int k = c - 1;
 
-		if (c == 0)
-			return 0;
-		while (k > 0 && ((unsigned char)buf[k] & 0xc0) == 0x80)
-			k--;
-		memmove(buf + k, buf + c, len - (size_t)c + 1);
-		c = k;
+		if (c == 0) {
+			done = 0;
+		} else {
+			while (k > 0 && ((unsigned char)buf[k] & 0xc0) == 0x80)
+				k--;
+			memmove(buf + k, buf + c, len - (size_t)c + 1);
+			c = k;
+		}
 	} else if (!strcmp(key, "Delete")) {
 		int k = c + 1;
 
-		if (c >= (int)len)
-			return 0;
-		while (k < (int)len && ((unsigned char)buf[k] & 0xc0) == 0x80)
-			k++;
-		memmove(buf + c, buf + k, len - (size_t)k + 1);
+		if (c >= (int)len) {
+			done = 0;
+		} else {
+			while (k < (int)len &&
+			    ((unsigned char)buf[k] & 0xc0) == 0x80)
+				k++;
+			memmove(buf + c, buf + k, len - (size_t)k + 1);
+		}
 	} else if (!strcmp(key, "ArrowLeft") && c > 0) {
 		c--;
 		while (c > 0 && ((unsigned char)buf[c] & 0xc0) == 0x80)
@@ -3193,16 +3217,19 @@ int shell_edit(soie_node *el, int *cp, const char *key, const char *text)
 	} else if (!strcmp(key, "End")) {
 		c = (int)len;
 	} else if (n > 0 && (unsigned char)text[0] >= 0x20 &&
-		   text[0] != 0x7f && len + n < sizeof(buf) - 1) {
+		   text[0] != 0x7f) {
 		memmove(buf + c + n, buf + c, len - (size_t)c + 1);
 		memcpy(buf + c, text, n);
 		c += (int)n;
 	} else {
-		return 0;
+		done = 0;
 	}
-	soie_element_set_attr(el, "value", buf);
-	*cp = c;
-	return 1;
+	if (done) {
+		soie_element_set_attr(el, "value", buf);
+		*cp = c;
+	}
+	free(buf);
+	return done;
 }
 
 static int key_in(struct shell *s, const char *key, const char *text, int mods)
@@ -3392,9 +3419,7 @@ int shell_paste(struct shell *s, const char *text)
 
 	if (!is_text_control(s->focus))
 		return 0;
-	v = soie_element_get_attr(s->focus, "value");
-	if (!v)
-		v = "";
+	v = field_value(s->focus);
 	len = strlen(v);
 	if (s->caret > (int)len)
 		s->caret = (int)len;

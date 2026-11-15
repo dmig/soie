@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<form><textarea name="t">hello</textarea></form>
+<script>
+var log = (...a) => console.log(a.map(String).join(' '));
+var t = document.querySelector('textarea'), f = document.forms[0];
+// not edited: the value is the text inside
+log('start', t.value, t.defaultValue, t.textLength);
+// what is typed lives in the value attribute (the shell's way)
+t.setAttribute('value', 'typed');
+log('typed', t.value, t.defaultValue, new FormData(f).get('t'));
+t.value = 'set';
+log('set', t.value, t.defaultValue, t.textContent);
+t.defaultValue = 'other';
+log('default', t.value, t.defaultValue);
+f.reset();
+log('reset', t.value, t.defaultValue);
+</script>
