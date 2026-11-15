@@ -114,6 +114,8 @@ struct shell {
 	} hist;
 	soie_node *focus;	/* focused page control */
 	int caret;
+	int anchor;		/* its selection from there to the caret */
+	int fdrag;		/* the button pressed in it selects there */
 	int view_w, view_h;
 	float zoom;		/* the page's, 1 */
 	int dark;		/* prefers-color-scheme: dark */
@@ -843,12 +845,16 @@ static int after_scripts(struct shell *s)
 	if (s->page.doc) {
 		int c;
 		soie_node *f = soie_get_focus(s->page.doc, &c);
+		int a = soie_get_focus_anchor(s->page.doc);
 
 		if (f != s->focus) {
 			s->focus = f;
-			s->caret = c;
+			s->fdrag = 0;
 			moved = 1;
 		}
+		/* or its selection (setSelectionRange(), select()) */
+		s->caret = c;
+		s->anchor = a;
 	}
 	if (s->pending_open) {
 		char *u = s->pending_open;
@@ -939,7 +945,7 @@ static void layout_done(struct shell *s)
 {
 	s->page.laid_out = now_s();
 	s->page.height = soie_layout_height(s->page.doc);
-	soie_set_focus(s->page.doc, s->focus, s->caret);
+	soie_set_focus_range(s->page.doc, s->focus, s->anchor, s->caret);
 	clamp_scroll(s);
 	set_title(s);
 	find_again(s);
@@ -2164,7 +2170,8 @@ static void set_page_focus(struct shell *s, soie_node *n, int c)
 	soie_node *old = s->focus;
 
 	s->focus = n;
-	s->caret = c;
+	s->caret = s->anchor = c;
+	s->fdrag = 0;
 	if (s->page.doc)
 		soie_set_focus(s->page.doc, s->focus, s->caret);
 	if (old != n) {
@@ -3089,7 +3096,18 @@ static void click(struct shell *s, int x, int y, int mods)
 			return;
 	}
 	if (is_text_control(n)) {
-		set_page_focus(s, n, (int)strlen(field_value(n)));
+		/* the caret where the click is; Shift: the selection goes
+		 * on to there */
+		int k = soie_field_offset(s->page.doc, n, (float)x,
+			(float)(y + s->page.scroll)), a = s->anchor;
+		int keep = (mods & SOIE_MOD_SHIFT) && n == s->focus;
+		size_t len = strlen(field_value(n));
+
+		set_page_focus(s, n, k < 0 || k > (int)len ? (int)len : k);
+		if (keep) {
+			s->anchor = a;
+			soie_set_focus_range(s->page.doc, n, a, s->caret);
+		}
 		return;
 	}
 	if (is_dropdown(n) && !soie_element_get_attr(n, "disabled")) {
@@ -3170,66 +3188,193 @@ void shell_click(struct shell *s, int x, int y, int mods)
 	clamp_scroll(s);
 }
 
-int shell_edit(soie_node *el, int *cp, const char *key, const char *text)
+/* Text fields: moves over their value v (len bytes) */
+
+static int word_byte(unsigned char c)
+{
+	return c >= 0x80 || c == '_' || (c >= '0' && c <= '9') ||
+		((c | 0x20) >= 'a' && (c | 0x20) <= 'z');
+}
+
+static int next_char(const char *v, int len, int c)
+{
+	if (c < len)
+		c++;
+	while (c < len && ((unsigned char)v[c] & 0xc0) == 0x80)
+		c++;
+	return c;
+}
+
+static int prev_char(const char *v, int c)
+{
+	if (c > 0)
+		c--;
+	while (c > 0 && ((unsigned char)v[c] & 0xc0) == 0x80)
+		c--;
+	return c;
+}
+
+/* Ctrl+arrows: to the end of the next word, the start of the last */
+static int word_right(const char *v, int len, int c)
+{
+	while (c < len && !word_byte((unsigned char)v[c]))
+		c++;
+	while (c < len && word_byte((unsigned char)v[c]))
+		c++;
+	return c;
+}
+
+static int word_left(const char *v, int c)
+{
+	while (c > 0 && !word_byte((unsigned char)v[c - 1]))
+		c--;
+	while (c > 0 && word_byte((unsigned char)v[c - 1]))
+		c--;
+	return c;
+}
+
+static int line_start(const char *v, int c)
+{
+	while (c > 0 && v[c - 1] != '\n')
+		c--;
+	return c;
+}
+
+static int line_end(const char *v, int len, int c)
+{
+	while (c < len && v[c] != '\n')
+		c++;
+	return c;
+}
+
+/* Up and down a textarea: as many characters into the line */
+static int line_move(const char *v, int len, int c, int down)
+{
+	int ls = line_start(v, c), col = 0, k, to, end;
+
+	for (k = ls; k < c; k = next_char(v, len, k))
+		col++;
+	if (down) {
+		if ((to = line_end(v, len, c)) >= len)
+			return len;
+		to++;
+	} else {
+		if (!ls)
+			return 0;
+		to = line_start(v, ls - 1);
+	}
+	end = line_end(v, len, to);
+	while (col-- > 0 && to < end)
+		to = next_char(v, len, to);
+	return to;
+}
+
+/* The word (or the run of spaces and signs) around c */
+static void word_at(const char *v, int len, int c, int *a, int *z)
+{
+	int w = c < len && word_byte((unsigned char)v[c]);
+
+	if (!w && c > 0 && word_byte((unsigned char)v[c - 1]))
+		w = 1, c--;
+	*a = *z = c;
+	while (*a > 0 && word_byte((unsigned char)v[*a - 1]) == w &&
+	    v[*a - 1] != '\n')
+		(*a)--;
+	while (*z < len && word_byte((unsigned char)v[*z]) == w &&
+	    v[*z] != '\n')
+		(*z)++;
+}
+
+/* A key in text field el: its caret *cp and the selection's other end
+ * *ap move, the selection is replaced or deleted. 2 when the value
+ * changed, 1 when only the caret or the selection did, 0 for a key it
+ * does not know. */
+static int field_key(soie_node *el, int *ap, int *cp, const char *key,
+	const char *text, int mods)
 {
 	const char *v = field_value(el);
-	size_t len = strlen(v), n = text ? strlen(text) : 0;
-	char *buf = malloc(len + n + 1);
-	int c = *cp, done = 1;
+	int len = (int)strlen(v), c = *cp, a = *ap, lo, hi, nc = -1;
+	int shift = mods & SOIE_MOD_SHIFT, ctrl = mods & SOIE_MOD_CTRL;
+	int multi = !strcmp(soie_element_name(el), "textarea");
+	const char *ins = NULL;
+	size_t n;
+	char *buf;
 
-	if (!buf)
-		abort();
-	if (c > (int)len)
-		c = (int)len;
-	memcpy(buf, v, len + 1);
-	if (!strcmp(key, "Backspace")) {
-		int k = c - 1;
+	c = c < 0 || c > len ? len : c;
+	a = a < 0 || a > len ? c : a;
+	lo = a < c ? a : c;
+	hi = a < c ? c : a;
+	if (mods & SOIE_MOD_ALT)
+		return 0;
+	if (!strcmp(key, "ArrowLeft") || !strcmp(key, "ArrowRight")) {
+		int right = key[5] == 'R';
 
-		if (c == 0) {
-			done = 0;
-		} else {
-			while (k > 0 && ((unsigned char)buf[k] & 0xc0) == 0x80)
-				k--;
-			memmove(buf + k, buf + c, len - (size_t)c + 1);
-			c = k;
-		}
-	} else if (!strcmp(key, "Delete")) {
-		int k = c + 1;
+		if (lo != hi && !shift && !ctrl)
+			nc = right ? hi : lo;
+		else if (ctrl)
+			nc = right ? word_right(v, len, c) : word_left(v, c);
+		else
+			nc = right ? next_char(v, len, c) : prev_char(v, c);
+	} else if (!strcmp(key, "ArrowUp") || !strcmp(key, "ArrowDown")) {
+		int down = key[5] == 'D';
 
-		if (c >= (int)len) {
-			done = 0;
-		} else {
-			while (k < (int)len &&
-			    ((unsigned char)buf[k] & 0xc0) == 0x80)
-				k++;
-			memmove(buf + c, buf + k, len - (size_t)k + 1);
-		}
-	} else if (!strcmp(key, "ArrowLeft") && c > 0) {
-		c--;
-		while (c > 0 && ((unsigned char)buf[c] & 0xc0) == 0x80)
-			c--;
-	} else if (!strcmp(key, "ArrowRight") && c < (int)len) {
-		c++;
-		while (c < (int)len && ((unsigned char)buf[c] & 0xc0) == 0x80)
-			c++;
+		nc = multi ? line_move(v, len, c, down) : down ? len : 0;
 	} else if (!strcmp(key, "Home")) {
-		c = 0;
+		nc = multi && !ctrl ? line_start(v, c) : 0;
 	} else if (!strcmp(key, "End")) {
-		c = (int)len;
-	} else if (n > 0 && (unsigned char)text[0] >= 0x20 &&
+		nc = multi && !ctrl ? line_end(v, len, c) : len;
+	} else if (ctrl && (!strcmp(key, "a") || !strcmp(key, "A"))) {
+		if (!len || (a == 0 && c == len))
+			return 1;
+		*ap = 0;
+		*cp = len;
+		return 1;
+	}
+	if (nc >= 0) {
+		if (nc == c && (shift || a == c))
+			return 1;
+		*cp = nc;
+		*ap = shift ? a : nc;
+		return 1;
+	}
+	/* what changes the value: the selection goes, the key's text
+	 * comes in its place */
+	if (!strcmp(key, "Backspace") || !strcmp(key, "Delete")) {
+		if (lo == hi) {
+			if (key[0] == 'B')
+				lo = ctrl ? word_left(v, c) : prev_char(v, c);
+			else
+				hi = ctrl ? word_right(v, len, c) :
+					next_char(v, len, c);
+		}
+		if (lo == hi)
+			return 0;
+	} else if (!strcmp(key, "Enter") && multi && !ctrl) {
+		ins = "\n";
+	} else if (text && (unsigned char)text[0] >= 0x20 &&
 		   text[0] != 0x7f) {
-		memmove(buf + c + n, buf + c, len - (size_t)c + 1);
-		memcpy(buf + c, text, n);
-		c += (int)n;
+		ins = text;
 	} else {
-		done = 0;
+		return 0;
 	}
-	if (done) {
-		soie_element_set_attr(el, "value", buf);
-		*cp = c;
-	}
+	n = ins ? strlen(ins) : 0;
+	if (!(buf = malloc((size_t)len + n + 1)))
+		abort();
+	memcpy(buf, v, (size_t)lo);
+	if (n)
+		memcpy(buf + lo, ins, n);
+	memcpy(buf + lo + n, v + hi, (size_t)(len - hi) + 1);
+	soie_element_set_attr(el, "value", buf);
 	free(buf);
-	return done;
+	*cp = *ap = lo + (int)n;
+	return 2;
+}
+
+int shell_edit(soie_node *el, int *cp, const char *key, const char *text)
+{
+	int a = *cp;
+
+	return field_key(el, &a, cp, key, text, 0) != 0;
 }
 
 static int key_in(struct shell *s, const char *key, const char *text, int mods)
@@ -3269,10 +3414,11 @@ static int key_in(struct shell *s, const char *key, const char *text, int mods)
 		}
 		if (!strcmp(key, "Escape")) {
 			set_page_focus(s, NULL, 0);
-		} else if (shell_edit(s->focus, &s->caret, key, text)) {
-			soie_set_focus(s->page.doc, s->focus, s->caret);
-			if (strncmp(key, "Arrow", 5) && strcmp(key, "Home") &&
-			    strcmp(key, "End"))
+		} else if ((r = field_key(s->focus, &s->anchor, &s->caret,
+		    key, text, mods))) {
+			soie_set_focus_range(s->page.doc, s->focus, s->anchor,
+				s->caret);
+			if (r == 2)
 				fire(s, s->focus, "input", 0, 0, NULL, 0);
 		} else if (mods & (SOIE_MOD_CTRL | SOIE_MOD_ALT |
 		    SOIE_MOD_META)) {
@@ -3410,25 +3556,40 @@ void shell_focus_out(struct shell *s)
 	pop_close(s);
 }
 
+/* The selection in the focused text control: from *lo to *hi, 0
+ * without one */
+static int field_range(struct shell *s, int *lo, int *hi)
+{
+	int len, a = s->anchor, c = s->caret;
+
+	if (!is_text_control(s->focus))
+		return 0;
+	len = (int)strlen(field_value(s->focus));
+	c = c < 0 || c > len ? len : c;
+	a = a < 0 || a > len ? c : a;
+	*lo = a < c ? a : c;
+	*hi = a < c ? c : a;
+	return *lo != *hi;
+}
+
 int shell_paste(struct shell *s, const char *text)
 {
 	const char *v;
 	char *buf, *o;
 	size_t len;
-	int multi;
+	int multi, lo, hi;
 
 	if (!is_text_control(s->focus))
 		return 0;
+	field_range(s, &lo, &hi);
 	v = field_value(s->focus);
 	len = strlen(v);
-	if (s->caret > (int)len)
-		s->caret = (int)len;
 	multi = !strcmp(soie_element_name(s->focus), "textarea");
 	buf = malloc(len + strlen(text) + 1);
 	if (!buf)
 		abort();
-	memcpy(buf, v, (size_t)s->caret);
-	o = buf + s->caret;
+	memcpy(buf, v, (size_t)lo);
+	o = buf + lo;
 	for (; *text; text++) {
 		if (*text == '\r' && multi)
 			continue;
@@ -3438,14 +3599,41 @@ int shell_paste(struct shell *s, const char *text)
 		else if ((unsigned char)*text >= 0x20 || *text == '\t')
 			*o++ = *text;
 	}
-	strcpy(o, v + s->caret);
-	s->caret = (int)(o - buf);
+	strcpy(o, v + hi);
+	s->caret = s->anchor = (int)(o - buf);
 	soie_element_set_attr(s->focus, "value", buf);
 	free(buf);
 	soie_set_focus(s->page.doc, s->focus, s->caret);
 	fire(s, s->focus, "input", 0, 0, NULL, 0);
 	after_scripts(s);
 	return 1;
+}
+
+/* The text selected in the focused field, malloc()ed; not a
+ * password's */
+static char *field_selection(struct shell *s)
+{
+	const char *t = soie_element_get_attr(s->focus, "type");
+	int lo, hi;
+
+	if (!field_range(s, &lo, &hi) || (t && !strcasecmp(t, "password")))
+		return NULL;
+	return strndup(field_value(s->focus) + lo, (size_t)(hi - lo));
+}
+
+char *shell_cut(struct shell *s)
+{
+	char *t = field_selection(s);
+
+	if (t) {
+		s->in_input++;
+		field_key(s->focus, &s->anchor, &s->caret, "Delete", "", 0);
+		soie_set_focus(s->page.doc, s->focus, s->caret);
+		fire(s, s->focus, "input", 0, 0, NULL, 0);
+		after_scripts(s);
+		s->in_input--;
+	}
+	return t;
 }
 
 const char *shell_field(struct shell *s)
@@ -3550,6 +3738,29 @@ int shell_select_start(struct shell *s, int x, int y, int unit)
 		return 0;
 	had = sel_rects(s) > 0;
 	s->sel.doc = NULL;
+	s->fdrag = 0;
+	/* in the focused text field (the click put the caret there): a
+	 * word, a line or all of it, then a selection as it drags */
+	if (s->page.doc && is_text_control(s->focus) &&
+	    soie_hit_test(s->page.doc, (float)x, (float)(y +
+	    s->page.scroll)) == s->focus) {
+		const char *v = field_value(s->focus);
+		int len = (int)strlen(v), c = s->caret > len ? len : s->caret;
+
+		s->fdrag = 1;
+		if (unit == SOIE_SELECT_WORD) {
+			word_at(v, len, c, &s->anchor, &s->caret);
+		} else if (unit != SOIE_SELECT_CHAR) {
+			int multi = !strcmp(soie_element_name(s->focus),
+				"textarea");
+
+			s->anchor = multi ? line_start(v, c) : 0;
+			s->caret = multi ? line_end(v, len, c) : len;
+		}
+		soie_set_focus_range(s->page.doc, s->focus, s->anchor,
+			s->caret);
+		return 1;
+	}
 	/* a press on a link or a field is theirs */
 	if (!s->page.doc || shell_hover(s, x, y, link, sizeof(link)) !=
 	    SHELL_ARROW)
@@ -3567,6 +3778,18 @@ int shell_select_to(struct shell *s, int x, int y)
 	/* the button held over an open list: it follows the pointer */
 	if (pop_check(s))
 		return pop_hover(s, x, y);
+	/* a drag in the focused text field */
+	if (s->fdrag && s->page.doc && is_text_control(s->focus)) {
+		int k = soie_field_offset(s->page.doc, s->focus, (float)x,
+			(float)(y + s->page.scroll));
+
+		if (k < 0 || k == s->caret)
+			return 0;
+		s->caret = k;
+		soie_set_focus_range(s->page.doc, s->focus, s->anchor,
+			s->caret);
+		return 1;
+	}
 	if (!s->sel.doc || s->sel.doc != s->page.doc)
 		return 0;
 	if (s->sel.pt[2] == (float)x && s->sel.pt[3] == (float)(y +
@@ -3595,6 +3818,11 @@ int shell_select_clear(struct shell *s)
 
 char *shell_selection(struct shell *s)
 {
+	char *t;
+
+	/* the field's selection first, then the page's */
+	if ((t = field_selection(s)))
+		return t;
 	if (!sel_rects(s))
 		return NULL;
 	return soie_select_text(s->page.doc, s->sel.pt, s->sel.unit);

@@ -2979,7 +2979,9 @@ html('HTMLInputElement', ['input'], (B) => class extends formControl(B) {
 		return v;
 	}
 	set value(v) {
+		const was = this.value;
 		api.setAttr(this, 'value', v === null ? '' : str(v));
+		valueSet(this, was);
 	}
 	get defaultValue() { return api.getAttr(this, 'value') || ''; }
 	set defaultValue(v) { api.setAttr(this, 'value', str(v)); }
@@ -3002,10 +3004,6 @@ html('HTMLInputElement', ['input'], (B) => class extends formControl(B) {
 	get valueAsNumber() { return parseFloat(this.value); }
 	set valueAsNumber(v) { this.value = String(v); }
 	get files() { return list([]); }
-	get selectionStart() { return this.value.length; }
-	get selectionEnd() { return this.value.length; }
-	select() {}
-	setSelectionRange() {}
 	setRangeText() {}
 	stepUp() {}
 	stepDown() {}
@@ -3050,14 +3048,14 @@ html('HTMLTextAreaElement', ['textarea'], (B) => class extends formControl(B) {
 		const v = api.getAttr(this, 'value');
 		return v === null ? this.textContent : v;
 	}
-	set value(v) { api.setAttr(this, 'value', v === null ? '' : str(v)); }
+	set value(v) {
+		const was = this.value;
+		api.setAttr(this, 'value', v === null ? '' : str(v));
+		valueSet(this, was);
+	}
 	get defaultValue() { return this.textContent; }
 	set defaultValue(v) { this.textContent = v; }
 	get textLength() { return this.value.length; }
-	get selectionStart() { return this.value.length; }
-	get selectionEnd() { return this.value.length; }
-	select() {}
-	setSelectionRange() {}
 });
 reflect(HTMLTextAreaElement, ['name', 'placeholder', 'autocomplete',
 	'wrap', 'dirName']);
@@ -3065,6 +3063,93 @@ reflect(HTMLTextAreaElement, ['disabled', 'required', 'readOnly',
 	'autofocus'], 'bool');
 reflect(HTMLTextAreaElement, ['rows', 'cols', 'maxLength', 'minLength'],
 	'int');
+
+/* The selection of text fields: the host keeps the focused one's (byte
+ * offsets in the value, api.fieldSel()), an unfocused one keeps what a
+ * script set here */
+const fieldSels = new WeakMap();
+function utf8Len(s, i) {
+	let n = 0;
+	for (let k = 0; k < i && k < s.length; k++) {
+		const c = s.charCodeAt(k);
+		if (c < 0x80) n += 1;
+		else if (c < 0x800) n += 2;
+		else if (c >= 0xd800 && c < 0xdc00 && k + 1 < s.length) {
+			n += 4;
+			k++;
+		} else n += 3;
+	}
+	return n;
+}
+function u16Index(s, b) {
+	let k = 0;
+	if (b < 0)
+		return s.length;
+	for (;;) {
+		const c = s.charCodeAt(k), step = c >= 0xd800 && c < 0xdc00 ?
+			2 : 1;
+		if (k >= s.length || utf8Len(s, k + step) > b)
+			return Math.min(k, s.length);
+		k += step;
+	}
+}
+/* a script changed the value: the caret goes to its end */
+function valueSet(el, was) {
+	if (el.value === was)
+		return;
+	fieldSels.delete(el);
+	api.setFieldSel(el, -1, -1);
+}
+function selectable(el) {
+	return el.localName === 'textarea' ||
+		/^(text|search|url|tel|password)$/.test(el.type);
+}
+function fieldSel(el) {
+	const v = el.value, r = api.fieldSel(el);
+	if (r) {
+		const a = u16Index(v, r[0]), c = u16Index(v, r[1]);
+		return [Math.min(a, c), Math.max(a, c), c < a ? 'backward' :
+			'forward'];
+	}
+	const s = fieldSels.get(el) || [v.length, v.length, 'none'];
+	return [Math.min(s[0], v.length), Math.min(s[1], v.length), s[2]];
+}
+for (const C of [HTMLInputElement, HTMLTextAreaElement])
+	Object.defineProperties(C.prototype, {
+		selectionStart: { configurable: true,
+			get() { return selectable(this) ? fieldSel(this)[0] : null; },
+			set(v) {
+				const e = fieldSel(this)[1];
+				this.setSelectionRange(v, Math.max(v, e));
+			} },
+		selectionEnd: { configurable: true,
+			get() { return selectable(this) ? fieldSel(this)[1] : null; },
+			set(v) { this.setSelectionRange(fieldSel(this)[0], v); } },
+		selectionDirection: { configurable: true,
+			get() { return selectable(this) ? fieldSel(this)[2] : null; },
+			set(d) {
+				const s = fieldSel(this);
+				this.setSelectionRange(s[0], s[1], d);
+			} },
+		setSelectionRange: { configurable: true, writable: true,
+			value(start, end, dir) {
+				if (!selectable(this))
+					return;
+				const v = this.value;
+				end = Math.min(Math.max(+end || 0, 0), v.length);
+				start = Math.min(Math.max(+start || 0, 0), end);
+				dir = dir === 'backward' || dir === 'forward' ?
+					dir : 'none';
+				fieldSels.set(this, [start, end, dir]);
+				const a = utf8Len(v, start), z = utf8Len(v, end);
+				if (dir === 'backward')
+					api.setFieldSel(this, z, a);
+				else
+					api.setFieldSel(this, a, z);
+			} },
+		select: { configurable: true, writable: true,
+			value() { this.setSelectionRange(0, this.value.length); } },
+	});
 html('HTMLButtonElement', ['button'], (B) => class extends formControl(B) {
 	get type() {
 		const t = (api.getAttr(this, 'type') || '').toLowerCase();

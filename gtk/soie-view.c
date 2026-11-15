@@ -732,12 +732,27 @@ static gboolean key_press(GtkWidget *w, GdkEventKey *e)
 			GDK_SELECTION_CLIPBOARD), pasted, g_object_ref(v));
 		return TRUE;
 	}
-	/* Ctrl+C, Ctrl+A on the page's text */
-	if (!shell_field(v->sh) && (mods & SOIE_MOD_CTRL) &&
+	/* Ctrl+C: the field's selection or the page's; Ctrl+X: the
+	 * field's; Ctrl+A on the page's text */
+	if ((mods & SOIE_MOD_CTRL) &&
 	    (e->keyval == GDK_KEY_c || e->keyval == GDK_KEY_C)) {
 		if (!soie_view_has_selection(v))
 			return FALSE;
 		soie_view_copy_clipboard(v);
+		return TRUE;
+	}
+	if (shell_field(v->sh) && (mods & SOIE_MOD_CTRL) &&
+	    (e->keyval == GDK_KEY_x || e->keyval == GDK_KEY_X)) {
+		char *t = shell_cut(v->sh);
+
+		if (!t)
+			return FALSE;
+		gtk_clipboard_set_text(gtk_widget_get_clipboard(w,
+			GDK_SELECTION_CLIPBOARD), t, -1);
+		free(t);
+		v->changed = TRUE;
+		redraw(v);
+		tick_soon(v);
 		return TRUE;
 	}
 	if (!shell_field(v->sh) && (mods & SOIE_MOD_CTRL) &&

@@ -61,6 +61,174 @@ static float control_num(const soie_node *n, const char *name, float dflt)
 	return e == a ? dflt : v;
 }
 
+
+/* Text fields. What they show is their value, a password as bullets
+ * (one a character); a line of an input is moved left to keep the
+ * caret in sight, a textarea starts at the line that does. Painting
+ * and soie_field_offset() place the text alike. */
+
+static int is_password(const soie_node *n)
+{
+	const char *t = soie_element_get_attr(n, "type");
+
+	return n->tag == TAG_INPUT && t && ascii_ieq(t, "password");
+}
+
+/* The text shown in field n into t */
+static void field_shown(const soie_node *n, struct buf *t)
+{
+	const char *v = soie_element_get_attr(n, "value");
+	const soie_node *c;
+
+	t->len = 0;
+	buf_add(t, "", 0);
+	if (n->tag == TAG_TEXTAREA && !v) {
+		for (c = n->first; c; c = c->next)
+			if (c->type == SOIE_TEXT)
+				buf_add(t, c->u.text.data, c->u.text.len);
+	} else if (v && is_password(n)) {
+		for (; *v; v++)
+			if (((unsigned char)*v & 0xc0) != 0x80)
+				buf_add(t, "\xe2\x80\xa2", 3);
+	} else if (v) {
+		buf_add(t, v, strlen(v));
+	}
+}
+
+/* Value offset off as an offset in the text shown (len bytes) */
+static size_t shown_off(const soie_node *n, int off, size_t len)
+{
+	size_t k = 0;
+	const char *v;
+
+	if (off < 0)
+		return len;
+	if (is_password(n) && (v = soie_element_get_attr(n, "value"))) {
+		int i;
+
+		for (i = 0; v[i] && i < off; i++)
+			if (((unsigned char)v[i] & 0xc0) != 0x80)
+				k += 3;
+	} else {
+		k = (size_t)off;
+	}
+	return k < len ? k : len;
+}
+
+/* An offset in the text shown as one in the value */
+static int value_off(const soie_node *n, size_t k)
+{
+	const char *v;
+	size_t chars = k / 3;
+	int i = 0;
+
+	if (!is_password(n) || !(v = soie_element_get_attr(n, "value")))
+		return (int)k;
+	for (; v[i]; i++)
+		if (((unsigned char)v[i] & 0xc0) != 0x80 && !chars--)
+			break;
+	return i;
+}
+
+/* How far an input's line moves left: its caret (at k) in sight */
+static float field_shift(const struct style *st, const struct buf *t,
+	size_t k, float avail)
+{
+	float w = text_width(st, t->s, k);
+
+	return w > avail - 1 ? w - (avail - 1) : 0;
+}
+
+/* The first line a textarea of height h shows: the caret's (at k) is
+ * one of them */
+static int first_line(const struct buf *t, size_t k, float h, float lh)
+{
+	int line = 0, rows = lh > 0 ? (int)(h / lh) : 1;
+	size_t i;
+
+	for (i = 0; i < k && i < t->len; i++)
+		if (t->s[i] == '\n')
+			line++;
+	if (rows < 1)
+		rows = 1;
+	return line >= rows ? line - rows + 1 : 0;
+}
+
+/* The character boundary of s (len bytes) nearest to x from its start */
+static size_t nearest(const struct style *st, const char *s, size_t len,
+	float x)
+{
+	size_t i = 0, best = 0;
+	float bd = 1e30f;
+
+	for (;;) {
+		float w = text_width(st, s, i), d = fabsf(w - x);
+
+		if (d < bd) {
+			bd = d;
+			best = i;
+		}
+		if (i >= len || w > x)
+			break;
+		i++;
+		while (i < len && ((unsigned char)s[i] & 0xc0) == 0x80)
+			i++;
+	}
+	return best;
+}
+
+/* The selection's background from a to z of s, at x on a line; its
+ * line break selected too (nl), a space more */
+static void paint_selected(struct canvas *c, const struct style *st,
+	const char *s, size_t a, size_t z, float x, float top, float h,
+	int nl)
+{
+	static const unsigned char blue[4] = { 0, 120, 215, 102 };
+	float x0 = text_width(st, s, a), x1 = text_width(st, s, z);
+
+	if (nl)
+		x1 += text_width(st, " ", 1);
+	fill_rect(c, x + x0, top, x1 - x0, h, blue);
+}
+
+int soie_field_offset(soie_node *doc, soie_node *el, float x, float y)
+{
+	const struct box *b;
+	struct fontm m;
+	struct buf t = { 0 };
+	size_t k = 0;
+	int r;
+
+	if (doc->type != SOIE_DOCUMENT || !el || el->type != SOIE_ELEMENT ||
+	    (el->tag != TAG_INPUT && el->tag != TAG_TEXTAREA) ||
+	    !(b = element_box(el)))
+		return -1;
+	font_metrics(b->style, &m);
+	field_shown(el, &t);
+	if (doc->u.doc->focus == el)
+		k = shown_off(el, doc->u.doc->caret, t.len);
+	if (el->tag == TAG_TEXTAREA) {
+		float lh = m.ascent + m.descent;
+		int line = first_line(&t, k, b->h, lh) +
+			(lh > 0 && y > b->y ? (int)((y - b->y) / lh) : 0);
+		const char *s = t.s, *e;
+
+		while (line-- > 0 && (e = strchr(s, '\n')))
+			s = e + 1;
+		e = strchr(s, '\n');
+		r = (int)(s - t.s) + (int)nearest(b->style, s,
+			e ? (size_t)(e - s) : strlen(s), x - b->x);
+	} else {
+		float sh = doc->u.doc->focus == el ?
+			field_shift(b->style, &t, k, b->w) : 0;
+
+		r = value_off(el, nearest(b->style, t.s, t.len,
+			x - (b->x - sh)));
+	}
+	buf_free(&t);
+	return r;
+}
+
 void paint_control(struct canvas *c, const struct box *b)
 {
 	const soie_node *n = b->node;
@@ -237,30 +405,43 @@ void paint_control(struct canvas *c, const struct box *b)
 		return;
 	}
 	if (n->tag == TAG_TEXTAREA) {
-		const soie_node *t;
+		/* one line per newline, no wrapping yet */
+		float lh = m.ascent + m.descent;
+		size_t k = 0, lo = 0, hi = 0;
+		const char *s, *e;
+		int line, first;
 
-		for (t = n->first; t; t = t->next)
-			if (t->type == SOIE_TEXT)
-				buf_add(&text, t->u.text.data, t->u.text.len);
-		v = soie_element_get_attr(n, "value");
-		if (v) {
-			text.len = 0;
-			buf_add(&text, v, strlen(v));
+		field_shown(n, &text);
+		if (focused) {
+			size_t a = shown_off(n, n->doc->u.doc->anchor, text.len);
+
+			k = shown_off(n, n->doc->u.doc->caret, text.len);
+			lo = a < k ? a : k;
+			hi = a < k ? k : a;
 		}
-		buf_add(&text, "", 0);
+		first = first_line(&text, k, b->h, lh);
 		base = b->y + m.ascent;
-		{
-			/* one line per newline, no wrapping yet */
-			const char *s = text.s, *e;
-			float lh = m.ascent + m.descent;
+		for (s = text.s, line = 0; s && base < b->y + b->h + m.ascent;
+		     line++) {
+			size_t at = (size_t)(s - text.s), ll;
 
-			while (s && *s && base < b->y + b->h + m.ascent) {
-				e = strchr(s, '\n');
-				paint_text(c, st, s, e ? (size_t)(e - s) :
-					strlen(s), x, base);
+			e = strchr(s, '\n');
+			ll = e ? (size_t)(e - s) : strlen(s);
+			if (line >= first) {
+				if (lo < hi && lo <= at + ll && hi > at)
+					paint_selected(c, st, s, lo > at ?
+						lo - at : 0, hi > at + ll ? ll :
+						hi - at, x, base - m.ascent, lh,
+						hi > at + ll);
+				paint_text(c, st, s, ll, x, base);
+				if (focused && lo == hi && k >= at &&
+				    k <= at + ll)
+					fill_rect(c, x + text_width(st, s,
+						k - at), base - m.ascent, 1, lh,
+						fg);
 				base += lh;
-				s = e ? e + 1 : NULL;
 			}
+			s = e ? e + 1 : NULL;
 		}
 		buf_free(&text);
 		return;
@@ -275,17 +456,9 @@ void paint_control(struct canvas *c, const struct box *b)
 		paint_text(c, st, v, strlen(v), x + (b->w - tw) / 2, base);
 		return;
 	}
-	v = soie_element_get_attr(n, "value");
-	if (type && ascii_ieq(type, "password") && v) {
-		size_t k, len = strlen(v);
-
-		for (k = 0; k < len; k++)
-			if (((unsigned char)v[k] & 0xc0) != 0x80)
-				buf_add(&text, "\xe2\x80\xa2", 3);
-		buf_add(&text, "", 0);
-		v = text.s;
-	}
-	if ((!v || !*v) && !focused &&
+	field_shown(n, &text);
+	v = text.s;
+	if (!*v && !focused &&
 	    (v = soie_element_get_attr(n, "placeholder"))) {
 		/* the text's colour, faded as browsers do (Firefox 0.54) */
 		float a = c->alpha;
@@ -296,37 +469,33 @@ void paint_control(struct canvas *c, const struct box *b)
 		buf_free(&text);
 		return;
 	}
-	if (!v)
-		v = "";
 	{
-		int cx0 = c->cx1;
-		int clip = (int)(b->x + b->w - c->ox + 1);
+		int cx0 = c->cx0, cx1 = c->cx1;
+		int l = (int)(b->x - b->p[3] - c->ox);
+		int r = (int)(b->x + b->w - c->ox + 1);
+		size_t k = 0, a = 0;
+		float sh = 0;
 
-		if (clip < c->cx1)
-			c->cx1 = clip;
-		paint_text(c, st, v, strlen(v), x, base);
+		if (l > c->cx0)
+			c->cx0 = l;
+		if (r < c->cx1)
+			c->cx1 = r;
 		if (focused) {
-			int caret = n->doc->u.doc->caret;
-			size_t len = strlen(v);
-
-			if (v == text.s) {
-				/* a password: the caret is in the value, one
-				 * bullet (3 bytes) a character before it */
-				const char *o = soie_element_get_attr(n, "value");
-				int k, chars = 0;
-
-				for (k = 0; o[k] && k < caret; k++)
-					if (((unsigned char)o[k] & 0xc0) != 0x80)
-						chars++;
-				caret = caret < 0 ? -1 : chars * 3;
-			}
-			if (caret < 0 || (size_t)caret > len)
-				caret = (int)len;
-			tw = text_width(st, v, (size_t)caret);
-			fill_rect(c, x + tw, base - m.ascent, 1,
+			k = shown_off(n, n->doc->u.doc->caret, text.len);
+			a = shown_off(n, n->doc->u.doc->anchor, text.len);
+			sh = field_shift(st, &text, k, b->w);
+		}
+		if (a != k)
+			paint_selected(c, st, v, a < k ? a : k, a < k ? k : a,
+				x - sh, base - m.ascent, m.ascent + m.descent, 0);
+		paint_text(c, st, v, text.len, x - sh, base);
+		if (focused && a == k) {
+			tw = text_width(st, v, k);
+			fill_rect(c, x - sh + tw, base - m.ascent, 1,
 				m.ascent + m.descent, fg);
 		}
-		c->cx1 = cx0;
+		c->cx0 = cx0;
+		c->cx1 = cx1;
 	}
 	buf_free(&text);
 }

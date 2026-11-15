@@ -1259,8 +1259,46 @@ static JSValue n_focus(JSContext *js, JSValueConst this, int argc,
 		return JS_UNDEFINED;
 	v = el && soie_node_get_type(el) == SOIE_ELEMENT ?
 		soie_element_get_attr(el, "value") : NULL;
-	soie_set_focus(c->doc, el, v ? (int)strlen(v) : 0);
+	/* -1: the end of a textarea's text */
+	soie_set_focus(c->doc, el, v ? (int)strlen(v) : -1);
 	return JS_UNDEFINED;
+}
+
+/* fieldSel(el): [anchor, caret] of focused field el, byte offsets in
+ * its value (-1: its end); null when el is not focused */
+static JSValue n_field_sel(JSContext *js, JSValueConst this, int argc,
+	JSValueConst *argv)
+{
+	struct sctx *c = ctx_of(js);
+	soie_node *el = argc > 0 ? unwrap(argv[0]) : NULL;
+	int caret;
+	JSValue a;
+
+	(void)this;
+	if (!el || soie_get_focus(c->doc, &caret) != el)
+		return JS_NULL;
+	a = JS_NewArray(js);
+	JS_SetPropertyUint32(js, a, 0,
+		JS_NewInt32(js, soie_get_focus_anchor(c->doc)));
+	JS_SetPropertyUint32(js, a, 1, JS_NewInt32(js, caret));
+	return a;
+}
+
+/* setFieldSel(el, anchor, caret): the selection of focused field el;
+ * false when el is not focused */
+static JSValue n_set_field_sel(JSContext *js, JSValueConst this, int argc,
+	JSValueConst *argv)
+{
+	struct sctx *c = ctx_of(js);
+	soie_node *el = argc > 0 ? unwrap(argv[0]) : NULL;
+	int32_t a = 0, k = 0;
+
+	(void)this;
+	if (!el || argc < 3 || soie_get_focus(c->doc, NULL) != el ||
+	    JS_ToInt32(js, &a, argv[1]) || JS_ToInt32(js, &k, argv[2]))
+		return JS_FALSE;
+	soie_set_focus_range(c->doc, el, a, k);
+	return JS_TRUE;
 }
 
 /* document.all(i): the i-th element of the page, in tree order */
@@ -3220,6 +3258,8 @@ static const JSCFunctionListEntry natives[] = {
 	JS_CFUNC_DEF("adopt", 2, n_adopt),
 	JS_CFUNC_DEF("hit", 2, n_hit),
 	JS_CFUNC_DEF("focus", 1, n_focus),
+	JS_CFUNC_DEF("fieldSel", 1, n_field_sel),
+	JS_CFUNC_DEF("setFieldSel", 3, n_set_field_sel),
 	JS_CFUNC_DEF("htmlAll", 0, n_html_all),
 	JS_CFUNC_DEF("gen", 0, n_gen),
 	JS_CFUNC_DEF("drain", 0, n_drain),

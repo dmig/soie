@@ -2022,6 +2022,47 @@ on the same frozen DOM.
   the same at the engine's level: BGRA against RGBA, bands, a rect and
   a scrolled page against the whole.
 
+## Editing text fields
+
+- Nicolae's report on Toile (November 2026): a click in a field put
+  the caret at the end, no text could be selected in it, Ctrl+arrows
+  moved one character. Fields now edit as in other browsers: a click
+  places the caret, Shift+click, a drag, a double (word) or triple
+  click (all, a textarea's line) selects; Shift with the arrows, Home
+  and End selects; Ctrl+arrows go by words, Ctrl+Backspace and
+  Ctrl+Delete delete one; typing, pasting, Backspace replace the
+  selection; Ctrl+A selects the field, Ctrl+C and Ctrl+X copy and cut
+  it (never a password's); Enter, Up and Down work in a textarea.
+- The selection is the caret and an anchor, byte offsets in the
+  value: the engine keeps them with the focus (soie_set_focus_range(),
+  soie_get_focus_anchor()) and paints them; the shell edits them
+  (field_key()). One model for the three fronts, none has code of its
+  own beyond Ctrl+X and the clipboard.
+- Where a point falls in a field (soie_field_offset()) is computed by
+  the code that paints it (lib/forms.c): the text shown (a password's
+  bullets), how far an input's line moves left and the first line a
+  textarea shows come from the same functions, a click lands on the
+  character drawn there.
+- A long input moves its line left until the caret is in sight, a
+  textarea starts at the line that shows it. No state for that: both
+  come from the caret. Other browsers keep a scroll offset that moves
+  less; not worth a state per control.
+- A word is letters, digits, '_' and every non-ASCII byte: accents and
+  other scripts are words, Unicode punctuation too (rare in fields).
+  Ctrl+Right goes to the end of the word, as GTK and Firefox on Linux.
+- A textarea's value is its value attribute once typed in (the shell
+  starts it from the text inside at the first key or click); scripts
+  see the same (dom.js value), the text inside stays the default.
+- Scripts: selectionStart/End/Direction, setSelectionRange(), select()
+  read and set the host's selection of the focused field (UTF-16
+  offsets in scripts, bytes in the host: converted in dom.js; an
+  offset inside a surrogate pair goes to its end). An unfocused field
+  keeps what a script set, in the script only. A value set by a
+  script puts the caret at its end, as the standard says.
+- Not done: undo (Ctrl+Z), drag and drop of text, a field's selection
+  as PRIMARY while it is made with the keys (the mouse sets it),
+  textarea wrapping (lines are still cut at the field's edge).
+
 ## The pop-up list of a select
 
 - A click on a drop-down select cycled through its options: no way to

@@ -1620,6 +1620,20 @@ static struct box *find_box(struct box *b, const soie_node *el)
 	return NULL;
 }
 
+/* Element el's box in the document's layout, NULL without one */
+struct box *element_box(const soie_node *el)
+{
+	const struct layout *l = el->doc->u.doc->layout;
+	struct box *b;
+
+	if (!l || !l->root || el->type != SOIE_ELEMENT)
+		return NULL;
+	if (el->u.el.box_tree == l->serial && (b = el->u.el.box) &&
+	    b->node == el)
+		return b;
+	return find_box(l->root, el);
+}
+
 int soie_element_rect(const soie_node *el, float *x, float *y, float *w,
 	float *h)
 {
@@ -2084,17 +2098,24 @@ char *soie_select_text(soie_node *doc, const float *points, int unit)
 	return t.s;
 }
 
-void soie_set_focus(soie_node *doc, soie_node *el, int caret)
+void soie_set_focus_range(soie_node *doc, soie_node *el, int anchor,
+	int caret)
 {
 	if (doc->type != SOIE_DOCUMENT)
 		return;
 	if (doc->u.doc->damage && (el != doc->u.doc->focus ||
-	    caret != doc->u.doc->caret)) {
+	    caret != doc->u.doc->caret || anchor != doc->u.doc->anchor)) {
 		damage_node(doc, doc->u.doc->focus);
 		damage_node(doc, el);
 	}
 	doc->u.doc->focus = el;
 	doc->u.doc->caret = caret;
+	doc->u.doc->anchor = anchor;
+}
+
+void soie_set_focus(soie_node *doc, soie_node *el, int caret)
+{
+	soie_set_focus_range(doc, el, caret, caret);
 }
 
 soie_node *soie_get_focus(const soie_node *doc, int *caret)
@@ -2104,4 +2125,9 @@ soie_node *soie_get_focus(const soie_node *doc, int *caret)
 	if (caret)
 		*caret = doc->u.doc->caret;
 	return doc->u.doc->focus;
+}
+
+int soie_get_focus_anchor(const soie_node *doc)
+{
+	return doc->type == SOIE_DOCUMENT ? doc->u.doc->anchor : 0;
 }

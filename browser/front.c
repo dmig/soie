@@ -890,15 +890,25 @@ void front_key(const char *k, const char *text, int mods)
 	}
 	if (ctrl && is(k, 'c')) {
 		const char *v = field == F_URL ? soie_element_get_attr(
-			find_id(chrome, "url"), "value") : field == F_FIND ?
-			NULL : shell_field(sh);
+			find_id(chrome, "url"), "value") : NULL;
 		char *t;
 
 		if (v && *v) {
 			tk_copy(1, v);
-		} else if (field == F_NONE && !v && (t = shell_selection(sh))) {
+		} else if (field == F_NONE && (t = shell_selection(sh))) {
+			/* the page field's selection, else the page's */
 			tk_copy(1, t);
 			free(t);
+		}
+		return;
+	}
+	if (ctrl && is(k, 'x') && field == F_NONE && shell_field(sh)) {
+		char *t = shell_cut(sh);
+
+		if (t) {
+			tk_copy(1, t);
+			free(t);
+			dirty |= D_PAGE;
 		}
 		return;
 	}

@@ -64,6 +64,7 @@ struct docinfo {
 	struct images *images;
 	struct soie_node *focus;	/* form control */
 	int caret;
+	int anchor;	/* the selection's other end in it, caret: none */
 	struct soie_node *all;	/* anext list */
 	unsigned long gen;	/* bumped by every change */
 	/* what soie_document_update() redoes */

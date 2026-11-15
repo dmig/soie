@@ -1,0 +1,11 @@
+log: focus 11,11,forward
+log: range 2,5,forward
+log: backward 1,3,backward
+log: select 0,11,forward
+log: start 4,11,forward
+log: value 4,4,forward
+log: utf16 1,3,forward
+log: clamped 1,1,forward
+log: unfocused 1,2,none
+log: textarea 7,7,forward
+log: checkbox null

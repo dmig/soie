@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<input id="i" value="hello world"><textarea id="t">one
+two</textarea><input id="c" type="checkbox">
+<script>
+var log = (...a) => console.log(a.map(String).join(' '));
+var i = document.getElementById('i'), t = document.getElementById('t');
+var sel = (e) => [e.selectionStart, e.selectionEnd, e.selectionDirection].join(',');
+// focused: the host keeps the selection
+i.focus();
+log('focus', sel(i));
+i.setSelectionRange(2, 5);
+log('range', sel(i));
+i.setSelectionRange(1, 3, 'backward');
+log('backward', sel(i));
+i.select();
+log('select', sel(i));
+i.selectionStart = 4;
+log('start', sel(i));
+// a value set by a script: the caret at its end
+i.value = 'é𝄞x';
+log('value', sel(i));
+// offsets are UTF-16 in scripts, bytes in the host
+i.setSelectionRange(1, 3);
+log('utf16', sel(i));
+i.setSelectionRange(9, 1);
+log('clamped', sel(i));
+// not focused: what was set here
+t.setSelectionRange(1, 2);
+log('unfocused', sel(t));
+t.focus();
+log('textarea', sel(t));
+log('checkbox', document.getElementById('c').selectionStart);
+</script>

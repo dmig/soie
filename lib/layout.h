@@ -20,6 +20,7 @@ struct fontm {
 
 void font_metrics(const struct style *st, struct fontm *m);
 float text_width(const struct style *st, const char *s, size_t len);
+struct box *element_box(const soie_node *el);
 unsigned other_case(unsigned c, int up);
 
 enum {

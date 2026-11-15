@@ -202,8 +202,12 @@ void shell_focus_out(shell *s);
 /* Edit the value attribute of el (an input) at caret *cp with a key;
  * 1 when it changed. The front's own text fields use it too. */
 int shell_edit(soie_node *el, int *cp, const char *key, const char *text);
-/* Into the focused text control: 1 when there is one. */
+/* Into the focused text control, over its selection: 1 when there is
+ * one. */
 int shell_paste(shell *s, const char *text);
+/* The text selected in the focused text control, malloc()ed, taken out
+ * of it; NULL without one (or in a password). */
+char *shell_cut(shell *s);
 /* The value of the focused text control, NULL without one. */
 const char *shell_field(shell *s);
 
@@ -214,14 +218,16 @@ const char *shell_field(shell *s);
 int shell_find(shell *s, const char *text, int dir, int *cur);
 
 /* Select text: from view x,y (unit SOIE_SELECT_CHAR, _WORD, _BLOCK for
- * a single, double, triple click; none starts on a link or a field,
- * theirs), then to x,y as the pointer moves. A click clears it. They
- * return 1 when the view must be painted again (shell_paint()). */
+ * a single, double, triple click; none starts on a link; in the
+ * focused text field, its text), then to x,y as the pointer moves. A
+ * click clears it. They return 1 when the view must be painted again
+ * (shell_paint()). */
 int shell_select_start(shell *s, int x, int y, int unit);
 int shell_select_to(shell *s, int x, int y);
 void shell_select_all(shell *s);
 int shell_select_clear(shell *s);
-/* Its text, malloc()ed; NULL without one. */
+/* Its text, malloc()ed, the focused field's selection first; NULL
+ * without one. */
 char *shell_selection(shell *s);
 
 /* Offscreen: load url, wait for it and its scripts, render to a PNG. */

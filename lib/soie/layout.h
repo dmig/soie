@@ -108,12 +108,20 @@ char *soie_select_text(soie_node *doc, const float *points, int unit);
 
 /*
  * The focused form control (or NULL) and the caret, a byte offset in
- * its value: soie_paint() draws the caret there.
+ * its value: soie_paint() draws the caret there. With a range, the
+ * text from anchor to caret is selected (soie_set_focus(): none).
  */
 void soie_set_focus(soie_node *doc, soie_node *el, int caret);
+void soie_set_focus_range(soie_node *doc, soie_node *el, int anchor,
+	int caret);
 /* The focused control (set by the host or a script's focus()) and its
- * caret. */
+ * caret; the anchor of its selection (the caret: none). */
 soie_node *soie_get_focus(const soie_node *doc, int *caret);
+int soie_get_focus_anchor(const soie_node *doc);
+/* The byte offset in the value of text control el (input, textarea)
+ * nearest to page point x, y, as soie_paint() shows it; -1 when it
+ * has no box. */
+int soie_field_offset(soie_node *doc, soie_node *el, float x, float y);
 
 /*
  * Fonts: system fonts are found under /usr/share/fonts and ~/.fonts;

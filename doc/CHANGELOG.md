@@ -7,6 +7,21 @@ each change are in [DECISIONS.md](DECISIONS.md).
 
 ## [Unreleased]
 
+### Added
+- Text fields edit as in other browsers (Toile, xsoie, wsoie): a click
+  places the caret where it is; Shift+click, a drag, a double or
+  triple click select; Shift with the arrows, Home and End selects;
+  Ctrl+arrows move by words (Ctrl+Shift selects them); typing, paste
+  and Backspace replace the selection; Ctrl+A, Ctrl+C, Ctrl+X work in
+  a field. The selection is painted, a long input scrolls to keep the
+  caret in sight. Textareas: Enter makes a new line, Up and Down move
+  between lines, the caret is drawn.
+- Scripts: `selectionStart`, `selectionEnd`, `selectionDirection`,
+  `setSelectionRange()` and `select()` of inputs and textareas. A value
+  set by a script puts the caret at its end.
+- Library: `soie_set_focus_range()`, `soie_get_focus_anchor()`,
+  `soie_field_offset()`.
+
 ### Fixed
 - GTK view (Toile, gsoie): Tab, Shift, Control, Alt, Caps Lock and
   F1-F12 pressed in a text field typed their names ("TabShift").
