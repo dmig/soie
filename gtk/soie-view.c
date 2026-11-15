@@ -674,6 +674,10 @@ static int key(SoieView *v, const char *k, const char *text, int mods)
 {
 	int r = shell_key(v->sh, k, text, mods);
 
+	/* a key that did more than scroll may have changed what is shown
+	 * without changing the page (the caret moved) */
+	if (r == 1)
+		v->changed = TRUE;
 	if (r)
 		redraw(v);
 	tick_soon(v);
