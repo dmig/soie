@@ -3613,10 +3613,13 @@ int shell_paste(struct shell *s, const char *text)
  * password's */
 static char *field_selection(struct shell *s)
 {
-	const char *t = soie_element_get_attr(s->focus, "type");
+	const char *t;
 	int lo, hi;
 
-	if (!field_range(s, &lo, &hi) || (t && !strcasecmp(t, "password")))
+	if (!field_range(s, &lo, &hi))
+		return NULL;
+	t = soie_element_get_attr(s->focus, "type");
+	if (t && !strcasecmp(t, "password"))
 		return NULL;
 	return strndup(field_value(s->focus) + lo, (size_t)(hi - lo));
 }
