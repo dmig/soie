@@ -122,6 +122,13 @@ int soie_get_focus_anchor(const soie_node *doc);
  * nearest to page point x, y, as soie_paint() shows it; -1 when it
  * has no box. */
 int soie_field_offset(soie_node *doc, soie_node *el, float x, float y);
+/* The caret at byte offset off of textarea el moved by the lines it
+ * shows (wrapped): to the nearest offset under the same x on the line
+ * above or below (past the first or last line: the start or the end of
+ * the text), or to the start or end of its line. -1 when el is not a
+ * textarea with a box. */
+enum { SOIE_FIELD_UP, SOIE_FIELD_DOWN, SOIE_FIELD_HOME, SOIE_FIELD_END };
+int soie_field_move(soie_node *doc, soie_node *el, int off, int how);
 
 /*
  * Fonts: system fonts are found under /usr/share/fonts and ~/.fonts;

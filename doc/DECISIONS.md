@@ -2059,9 +2059,29 @@ on the same frozen DOM.
   offset inside a surrogate pair goes to its end). An unfocused field
   keeps what a script set, in the script only. A value set by a
   script puts the caret at its end, as the standard says.
+- A textarea wraps its lines at spaces (wrap_rows() in lib/forms.c),
+  a word wider than the field cut where it reaches the edge; wrap="off"
+  and text-wrap-mode: nowrap keep each line whole, clipped. The spaces
+  a line is wrapped at hang after it, as in other browsers: End goes
+  before them, the next line starts after them. Painting, a click
+  (soie_field_offset()) and the caret's moves use the same lines: Up,
+  Down, Home and End go by the lines shown (soie_field_move()), the
+  shell falls back to the text's lines when the field has no box. Up
+  and Down keep the caret's x, not a column remembered across moves
+  (Firefox does): one press is right, several in a row can drift on
+  short lines.
+- The press places the caret (the mousedown's default action), before
+  mouseup and click are fired: their handlers read the new
+  selectionStart, as in other browsers. A cancelled mousedown leaves
+  the focus where it was.
+- tools/gui-smoke.sh clicks and types through a front on its own Xvfb
+  (links, empty space, every kind of field, a select, the middle
+  button, a page change with a field focused) and fails when it dies.
+  Rev 258 crashed on any click outside a field and its own bench
+  only clicked inside them; run it before each release, on the ASan
+  build too.
 - Not done: undo (Ctrl+Z), drag and drop of text, a field's selection
-  as PRIMARY while it is made with the keys (the mouse sets it),
-  textarea wrapping (lines are still cut at the field's edge).
+  as PRIMARY while it is made with the keys (the mouse sets it).
 
 ## The pop-up list of a select
 

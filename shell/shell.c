@@ -3041,6 +3041,23 @@ static void pop_paint(struct shell *s, unsigned char *rgba, int stride,
 			ix0 - px - 1, iy0 - py - 1 + s->pop.scroll);
 }
 
+/* The caret in text field n where the press at x, y is; Shift: the
+ * selection goes on to there */
+static void field_click(struct shell *s, soie_node *n, int x, int y,
+	int mods)
+{
+	int k = soie_field_offset(s->page.doc, n, (float)x,
+		(float)(y + s->page.scroll)), a = s->anchor;
+	int keep = (mods & SOIE_MOD_SHIFT) && n == s->focus;
+	size_t len = strlen(field_value(n));
+
+	set_page_focus(s, n, k < 0 || k > (int)len ? (int)len : k);
+	if (keep) {
+		s->anchor = a;
+		soie_set_focus_range(s->page.doc, n, a, s->caret);
+	}
+}
+
 static void click(struct shell *s, int x, int y, int mods)
 {
 	soie_node *n = s->page.doc ? soie_hit_test(s->page.doc, (float)x,
@@ -3054,6 +3071,10 @@ static void click(struct shell *s, int x, int y, int mods)
 		int box = 0;
 
 		md = fire(s, n, "mousedown", (float)x, cy, NULL, mods);
+		/* the press puts the caret in a text field, unless a
+		 * handler cancelled it: mouseup and click see it there */
+		if (!md && is_text_control(n))
+			field_click(s, n, x, y, mods);
 		fire(s, n, "mouseup", (float)x, cy, NULL, mods);
 		/* a checkbox or a radio changes before its click event, and
 		 * goes back if a handler cancels it (HTML 4.10.5.4): handlers
@@ -3095,21 +3116,9 @@ static void click(struct shell *s, int x, int y, int mods)
 		    soie_media_click(a, (float)x, (float)(y + s->page.scroll)))
 			return;
 	}
-	if (is_text_control(n)) {
-		/* the caret where the click is; Shift: the selection goes
-		 * on to there */
-		int k = soie_field_offset(s->page.doc, n, (float)x,
-			(float)(y + s->page.scroll)), a = s->anchor;
-		int keep = (mods & SOIE_MOD_SHIFT) && n == s->focus;
-		size_t len = strlen(field_value(n));
-
-		set_page_focus(s, n, k < 0 || k > (int)len ? (int)len : k);
-		if (keep) {
-			s->anchor = a;
-			soie_set_focus_range(s->page.doc, n, a, s->caret);
-		}
+	/* a text field: the press placed the caret */
+	if (is_text_control(n))
 		return;
-	}
 	if (is_dropdown(n) && !soie_element_get_attr(n, "disabled")) {
 		/* focused, its list opens; not when a script cancelled the
 		 * mousedown (a page's own list), as browsers do */
@@ -3289,8 +3298,8 @@ static void word_at(const char *v, int len, int c, int *a, int *z)
  * *ap move, the selection is replaced or deleted. 2 when the value
  * changed, 1 when only the caret or the selection did, 0 for a key it
  * does not know. */
-static int field_key(soie_node *el, int *ap, int *cp, const char *key,
-	const char *text, int mods)
+static int field_key(soie_node *doc, soie_node *el, int *ap, int *cp,
+	const char *key, const char *text, int mods)
 {
 	const char *v = field_value(el);
 	int len = (int)strlen(v), c = *cp, a = *ap, lo, hi, nc = -1;
@@ -3318,11 +3327,19 @@ static int field_key(soie_node *el, int *ap, int *cp, const char *key,
 	} else if (!strcmp(key, "ArrowUp") || !strcmp(key, "ArrowDown")) {
 		int down = key[5] == 'D';
 
-		nc = multi ? line_move(v, len, c, down) : down ? len : 0;
-	} else if (!strcmp(key, "Home")) {
-		nc = multi && !ctrl ? line_start(v, c) : 0;
-	} else if (!strcmp(key, "End")) {
-		nc = multi && !ctrl ? line_end(v, len, c) : len;
+		if (!multi)
+			nc = down ? len : 0;
+		else if (!doc || (nc = soie_field_move(doc, el, c, down ?
+		    SOIE_FIELD_DOWN : SOIE_FIELD_UP)) < 0)
+			nc = line_move(v, len, c, down);
+	} else if (!strcmp(key, "Home") || !strcmp(key, "End")) {
+		int end = key[0] == 'E';
+
+		if (!multi || ctrl)
+			nc = end ? len : 0;
+		else if (!doc || (nc = soie_field_move(doc, el, c, end ?
+		    SOIE_FIELD_END : SOIE_FIELD_HOME)) < 0)
+			nc = end ? line_end(v, len, c) : line_start(v, c);
 	} else if (ctrl && (!strcmp(key, "a") || !strcmp(key, "A"))) {
 		if (!len || (a == 0 && c == len))
 			return 1;
@@ -3374,7 +3391,7 @@ int shell_edit(soie_node *el, int *cp, const char *key, const char *text)
 {
 	int a = *cp;
 
-	return field_key(el, &a, cp, key, text, 0) != 0;
+	return field_key(NULL, el, &a, cp, key, text, 0) != 0;
 }
 
 static int key_in(struct shell *s, const char *key, const char *text, int mods)
@@ -3414,8 +3431,8 @@ static int key_in(struct shell *s, const char *key, const char *text, int mods)
 		}
 		if (!strcmp(key, "Escape")) {
 			set_page_focus(s, NULL, 0);
-		} else if ((r = field_key(s->focus, &s->anchor, &s->caret,
-		    key, text, mods))) {
+		} else if ((r = field_key(s->page.doc, s->focus, &s->anchor,
+		    &s->caret, key, text, mods))) {
 			soie_set_focus_range(s->page.doc, s->focus, s->anchor,
 				s->caret);
 			if (r == 2)
@@ -3630,7 +3647,8 @@ char *shell_cut(struct shell *s)
 
 	if (t) {
 		s->in_input++;
-		field_key(s->focus, &s->anchor, &s->caret, "Delete", "", 0);
+		field_key(NULL, s->focus, &s->anchor, &s->caret, "Delete", "",
+			0);
 		soie_set_focus(s->page.doc, s->focus, s->caret);
 		fire(s, s->focus, "input", 0, 0, NULL, 0);
 		after_scripts(s);

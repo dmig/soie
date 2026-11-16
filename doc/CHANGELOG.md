@@ -19,8 +19,13 @@ each change are in [DECISIONS.md](DECISIONS.md).
 - Scripts: `selectionStart`, `selectionEnd`, `selectionDirection`,
   `setSelectionRange()` and `select()` of inputs and textareas. A value
   set by a script puts the caret at its end.
+- Textareas wrap their lines at spaces, a word wider than the field
+  is cut; Up, Down, Home and End move by the lines shown. `wrap="off"`
+  keeps lines whole. The text stays inside the field.
 - Library: `soie_set_focus_range()`, `soie_get_focus_anchor()`,
-  `soie_field_offset()`.
+  `soie_field_offset()`, `soie_field_move()`.
+- `tools/gui-smoke.sh`: clicks and types through a browser on its own
+  Xvfb and fails if it crashes.
 
 ### Fixed
 - GTK view (Toile, gsoie): Tab, Shift, Control, Alt, Caps Lock and
@@ -32,6 +37,10 @@ each change are in [DECISIONS.md](DECISIONS.md).
   `FormData` (DuckDuckGo's search box, a textarea, sent an empty
   query: Enter did nothing). A textarea already filled lost its text
   at the first key, and a value over 16 KB was cut when edited.
+- Scripts: `mouseup` and `click` on a text field saw the caret where
+  it was before the click (`selectionStart`). The press places it
+  first, as in other browsers; a cancelled `mousedown` leaves the focus
+  where it was.
 
 ## [0.1.7] - 2026-11-14
 

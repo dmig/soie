@@ -663,6 +663,46 @@ static void test_select(void)
 	soie_node_free(doc);
 }
 
+/* A textarea's lines wrap at spaces: the caret moves and a click lands
+ * by the lines it shows */
+static void test_textarea_wrap(void)
+{
+	static const char html[] = "<style>body{margin:0}textarea{"
+		"display:block;margin:0;padding:0;border:0;width:80px;"
+		"height:60px;font:16px/20px x}</style>"
+		"<textarea id=w>aaaa bbbb cccc\nzz</textarea>"
+		"<textarea id=o wrap=off>aaaa bbbb cccc\nzz</textarea>"
+		"<input id=i value=x>";
+	soie_node *doc = soie_html_parse(html, sizeof(html) - 1, NULL);
+	size_t nq;
+	soie_node **w = soie_query(doc, "#w", 1, &nq),
+		**o = soie_query(doc, "#o", 1, &nq),
+		**in = soie_query(doc, "#i", 1, &nq);
+
+	/* 8 px a character: lines "aaaa bbbb", "cccc", "zz" */
+	CHECK(soie_style_document(doc, NULL) == 0);
+	CHECK(soie_layout_document(doc, 400, 300) == 0);
+	CHECK(soie_field_move(doc, w[0], 2, SOIE_FIELD_DOWN) == 12);
+	CHECK(soie_field_move(doc, w[0], 12, SOIE_FIELD_DOWN) == 17);
+	CHECK(soie_field_move(doc, w[0], 17, SOIE_FIELD_DOWN) == 17);
+	CHECK(soie_field_move(doc, w[0], 12, SOIE_FIELD_UP) == 2);
+	CHECK(soie_field_move(doc, w[0], 2, SOIE_FIELD_UP) == 0);
+	CHECK(soie_field_move(doc, w[0], 12, SOIE_FIELD_HOME) == 10);
+	CHECK(soie_field_move(doc, w[0], 12, SOIE_FIELD_END) == 14);
+	/* the space it wraps at hangs after its line */
+	CHECK(soie_field_move(doc, w[0], 3, SOIE_FIELD_END) == 9);
+	CHECK(soie_field_move(doc, w[0], 10, SOIE_FIELD_HOME) == 10);
+	CHECK(soie_field_offset(doc, w[0], 23, 1) == 3);
+	/* wrap=off: one line a line of the text */
+	CHECK(soie_field_move(doc, o[0], 2, SOIE_FIELD_DOWN) == 17);
+	CHECK(soie_field_move(doc, o[0], 12, SOIE_FIELD_END) == 14);
+	CHECK(soie_field_move(doc, in[0], 0, SOIE_FIELD_DOWN) == -1);
+	free(w);
+	free(o);
+	free(in);
+	soie_node_free(doc);
+}
+
 static void test_deep(void)
 {
 	/* Deep nesting must not exhaust the stack when freeing. */
@@ -823,6 +863,7 @@ int main(void)
 	test_bad_calc();
 	test_script_api();
 	test_select();
+	test_textarea_wrap();
 	test_deep();
 	test_hostile_depth();
 	test_hit_inline();

@@ -139,19 +139,125 @@ static float field_shift(const struct style *st, const struct buf *t,
 	return w > avail - 1 ? w - (avail - 1) : 0;
 }
 
-/* The first line a textarea of height h shows: the caret's (at k) is
- * one of them */
-static int first_line(const struct buf *t, size_t k, float h, float lh)
+/* The start of the character after the one at k of t (len bytes) */
+static size_t char_after(const char *t, size_t len, size_t k)
 {
-	int line = 0, rows = lh > 0 ? (int)(h / lh) : 1;
-	size_t i;
+	if (k < len)
+		k++;
+	while (k < len && ((unsigned char)t[k] & 0xc0) == 0x80)
+		k++;
+	return k;
+}
 
-	for (i = 0; i < k && i < t->len; i++)
-		if (t->s[i] == '\n')
-			line++;
+/* A line a textarea shows: len bytes of its text from at, the next
+ * line from next (past the line break, or the spaces it was wrapped
+ * at, which hang after it). */
+struct row {
+	size_t at, len, next;
+};
+
+/* The lines textarea n shows of text t (len bytes) in width w into
+ * *rows (malloc()ed), their number returned: one a line of the text,
+ * wrapped at spaces to fit, a word wider than w cut, unless wrap="off"
+ * or text-wrap-mode: nowrap. Always one at least. */
+static int wrap_rows(const soie_node *n, const struct style *st,
+	const char *t, size_t len, float w, struct row **rows)
+{
+	const char *wa = soie_element_get_attr(n, "wrap");
+	int wrap = w > 0 && !(wa && ascii_ieq(wa, "off")) &&
+		!kw(st, P_TEXT_WRAP_MODE, "nowrap");
+	size_t ls = 0, cap = 8;
+	int nr = 0;
+	struct row *r = xmalloc(cap * sizeof(*r));
+
+	for (;;) {
+		const char *e = memchr(t + ls, '\n', len - ls);
+		size_t le = e ? (size_t)(e - t) : len, at = ls;
+
+		for (;;) {
+			size_t brk = 0, blen = 0, i, k;
+
+			if ((size_t)nr == cap)
+				r = xrealloc(r, (cap *= 2) * sizeof(*r));
+			r[nr].at = at;
+			if (!wrap || text_width(st, t + at, le - at) <= w) {
+				r[nr].len = le - at;
+				r[nr++].next = le + 1;
+				break;
+			}
+			/* the last space run the line fits before */
+			for (i = at + 1; i < le; i++) {
+				if (t[i] != ' ' || t[i - 1] == ' ')
+					continue;
+				if (text_width(st, t + at, i - at) > w)
+					break;
+				blen = i - at;
+				for (brk = i; brk < le && t[brk] == ' '; brk++)
+					;
+			}
+			if (!brk) {
+				/* a word too wide: as much of it as fits, one
+				 * character at least */
+				k = char_after(t, le, at);
+				while (k < le && text_width(st, t + at,
+				    (i = char_after(t, le, k)) - at) <= w)
+					k = i;
+				brk = k;
+				blen = k - at;
+			}
+			r[nr].len = blen;
+			r[nr++].next = brk;
+			if (brk >= le) {
+				r[nr - 1].next = le + 1;
+				break;
+			}
+			at = brk;
+		}
+		if (le >= len)
+			break;
+		ls = le + 1;
+	}
+	*rows = r;
+	return nr;
+}
+
+/* The line of offset k: the last one starting at or before it (at a
+ * wrap, the line it starts) */
+static int row_of(const struct row *r, int nr, size_t k)
+{
+	int i = 0;
+
+	while (i + 1 < nr && r[i + 1].at <= k)
+		i++;
+	return i;
+}
+
+/* The first line a textarea of height h shows: the caret's (on line
+ * cr) is one of them */
+static int first_row(int cr, float h, float lh)
+{
+	int rows = lh > 0 ? (int)(h / lh) : 1;
+
 	if (rows < 1)
 		rows = 1;
-	return line >= rows ? line - rows + 1 : 0;
+	return cr >= rows ? cr - rows + 1 : 0;
+}
+
+/* A clip edge *e moved in to v: up for a low edge (lo), down for a
+ * high one */
+static void clip_to(int *e, int v, int lo)
+{
+	if (lo ? v > *e : v < *e)
+		*e = v;
+}
+
+/* The x of offset k on line r, at most the box's width w */
+static float row_x(const struct style *st, const char *t,
+	const struct row *r, size_t k, float w)
+{
+	float x = text_width(st, t + r->at, k - r->at);
+
+	return x > w && w > 0 ? w : x;
 }
 
 /* The character boundary of s (len bytes) nearest to x from its start */
@@ -209,15 +315,16 @@ int soie_field_offset(soie_node *doc, soie_node *el, float x, float y)
 		k = shown_off(el, doc->u.doc->caret, t.len);
 	if (el->tag == TAG_TEXTAREA) {
 		float lh = m.ascent + m.descent;
-		int line = first_line(&t, k, b->h, lh) +
+		struct row *rw;
+		int nr = wrap_rows(el, b->style, t.s, t.len, b->w, &rw);
+		int i = first_row(row_of(rw, nr, k), b->h, lh) +
 			(lh > 0 && y > b->y ? (int)((y - b->y) / lh) : 0);
-		const char *s = t.s, *e;
 
-		while (line-- > 0 && (e = strchr(s, '\n')))
-			s = e + 1;
-		e = strchr(s, '\n');
-		r = (int)(s - t.s) + (int)nearest(b->style, s,
-			e ? (size_t)(e - s) : strlen(s), x - b->x);
+		if (i >= nr)
+			i = nr - 1;
+		r = (int)(rw[i].at + nearest(b->style, t.s + rw[i].at,
+			rw[i].len, x - b->x));
+		free(rw);
 	} else {
 		float sh = doc->u.doc->focus == el ?
 			field_shift(b->style, &t, k, b->w) : 0;
@@ -225,6 +332,50 @@ int soie_field_offset(soie_node *doc, soie_node *el, float x, float y)
 		r = value_off(el, nearest(b->style, t.s, t.len,
 			x - (b->x - sh)));
 	}
+	buf_free(&t);
+	return r;
+}
+
+int soie_field_move(soie_node *doc, soie_node *el, int off, int how)
+{
+	const struct box *b;
+	struct buf t = { 0 };
+	struct row *rw;
+	size_t k;
+	int nr, i, r;
+
+	if (doc->type != SOIE_DOCUMENT || !el || el->type != SOIE_ELEMENT ||
+	    el->tag != TAG_TEXTAREA || !(b = element_box(el)))
+		return -1;
+	field_shown(el, &t);
+	k = off < 0 || (size_t)off > t.len ? t.len : (size_t)off;
+	nr = wrap_rows(el, b->style, t.s, t.len, b->w, &rw);
+	i = row_of(rw, nr, k);
+	switch (how) {
+	case SOIE_FIELD_HOME:
+		r = (int)rw[i].at;
+		break;
+	case SOIE_FIELD_END:
+		r = (int)(rw[i].at + rw[i].len);
+		break;
+	case SOIE_FIELD_UP:
+	case SOIE_FIELD_DOWN: {
+		float x = row_x(b->style, t.s, &rw[i], k, 0);
+		int to = i + (how == SOIE_FIELD_UP ? -1 : 1);
+
+		if (to < 0)
+			r = 0;
+		else if (to >= nr)
+			r = (int)t.len;
+		else
+			r = (int)(rw[to].at + nearest(b->style, t.s + rw[to].at,
+				rw[to].len, x));
+		break;
+	}
+	default:
+		r = (int)k;
+	}
+	free(rw);
 	buf_free(&t);
 	return r;
 }
@@ -405,11 +556,12 @@ void paint_control(struct canvas *c, const struct box *b)
 		return;
 	}
 	if (n->tag == TAG_TEXTAREA) {
-		/* one line per newline, no wrapping yet */
+		/* its lines, wrapped, from the first that keeps the caret
+		 * in sight */
 		float lh = m.ascent + m.descent;
 		size_t k = 0, lo = 0, hi = 0;
-		const char *s, *e;
-		int line, first;
+		struct row *rw;
+		int i, nr, cr, cx0, cy0, cx1, cy1;
 
 		field_shown(n, &text);
 		if (focused) {
@@ -419,30 +571,32 @@ void paint_control(struct canvas *c, const struct box *b)
 			lo = a < k ? a : k;
 			hi = a < k ? k : a;
 		}
-		first = first_line(&text, k, b->h, lh);
+		nr = wrap_rows(n, st, text.s, text.len, b->w, &rw);
+		cr = row_of(rw, nr, k);
 		base = b->y + m.ascent;
-		for (s = text.s, line = 0; s && base < b->y + b->h + m.ascent;
-		     line++) {
-			size_t at = (size_t)(s - text.s), ll;
+		/* inside its padding box */
+		cx0 = c->cx0, cy0 = c->cy0, cx1 = c->cx1, cy1 = c->cy1;
+		clip_to(&c->cx0, (int)(b->x - b->p[3] - c->ox), 1);
+		clip_to(&c->cx1, (int)(b->x + b->w + b->p[1] - c->ox + 1), 0);
+		clip_to(&c->cy0, (int)(b->y - b->p[0] - c->oy), 1);
+		clip_to(&c->cy1, (int)(b->y + b->h + b->p[2] - c->oy + 1), 0);
+		for (i = first_row(cr, b->h, lh);
+		     i < nr && base < b->y + b->h + m.ascent; i++) {
+			const char *s = text.s + rw[i].at;
+			size_t at = rw[i].at, ll = rw[i].len;
 
-			e = strchr(s, '\n');
-			ll = e ? (size_t)(e - s) : strlen(s);
-			if (line >= first) {
-				if (lo < hi && lo <= at + ll && hi > at)
-					paint_selected(c, st, s, lo > at ?
-						lo - at : 0, hi > at + ll ? ll :
-						hi - at, x, base - m.ascent, lh,
-						hi > at + ll);
-				paint_text(c, st, s, ll, x, base);
-				if (focused && lo == hi && k >= at &&
-				    k <= at + ll)
-					fill_rect(c, x + text_width(st, s,
-						k - at), base - m.ascent, 1, lh,
-						fg);
-				base += lh;
-			}
-			s = e ? e + 1 : NULL;
+			if (lo < hi && lo <= at + ll && hi > at)
+				paint_selected(c, st, s, lo > at ? lo - at : 0,
+					hi > at + ll ? ll : hi - at, x,
+					base - m.ascent, lh, hi > at + ll);
+			paint_text(c, st, s, ll, x, base);
+			if (focused && lo == hi && i == cr)
+				fill_rect(c, x + row_x(st, text.s, &rw[i], k,
+					b->w), base - m.ascent, 1, lh, fg);
+			base += lh;
 		}
+		c->cx0 = cx0, c->cy0 = cy0, c->cx1 = cx1, c->cy1 = cy1;
+		free(rw);
 		buf_free(&text);
 		return;
 	}

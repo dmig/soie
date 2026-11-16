@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<!--
+The page tools/gui-smoke.sh clicks and types into. One control per
+150 px band, each filling its band, so that a click lands on it
+whatever the height of the front's toolbar (0 to 60 px).
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Soie smoke</title>
+<style>
+body { margin: 0; font: 24px sans-serif }
+.band { height: 150px; margin: 0; padding: 0; overflow: hidden }
+.band > * { box-sizing: border-box; display: block; width: 700px;
+	height: 150px; margin: 0; font: inherit }
+a.band { display: block; background: #def }
+</style>
+</head>
+<body>
+<p class="band">Some words to select with a double click, a triple
+click or a drag; the pointer moves over them and the selection grows,
+then Control C copies it.</p>
+<div class="band"><input value="a text field"></div>
+<div class="band"><textarea>first line
+second line</textarea></div>
+<div class="band"><input type="password" value="secret"></div>
+<div class="band"><select><option>one<option>two<option>three</select></div>
+<a class="band" href="smoke.html?again">A link to this page again</a>
+<div class="band"></div>
+</body>
+</html>
