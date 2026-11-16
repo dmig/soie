@@ -7,6 +7,8 @@ each change are in [DECISIONS.md](DECISIONS.md).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-11-16
+
 ### Added
 - Text fields edit as in other browsers (Toile, xsoie, wsoie): a click
   places the caret where it is; Shift+click, a drag, a double or
@@ -457,6 +459,7 @@ each change are in [DECISIONS.md](DECISIONS.md).
 - Browsers: xsoie (X11), wsoie (Wayland), SoieView (GTK 3 widget).
 - soie-render, a headless renderer for tests and screenshots.
 
+[0.1.8]: https://hg.slitaz.org/soie/rev/0.1.8
 [0.1.7]: https://hg.slitaz.org/soie/rev/0.1.7
 [0.1.6]: https://hg.slitaz.org/soie/rev/0.1.6
 [0.1.5]: https://hg.slitaz.org/soie/rev/0.1.5

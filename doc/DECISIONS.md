@@ -3063,10 +3063,17 @@ run again):
   the view, file:// URLs take a fragment or a query. Same soname and
   extension ABI; one public function added (soie/layout.h):
   soie_layout_scroll().
+- 0.1.8 (2026-11-16): text fields edit as in other browsers (Nicolae's
+  report on Toile): the caret where the click is, selection with the
+  mouse and the keys, Ctrl+arrows by words, textareas that wrap and
+  whose typed text is their value. Same soname and extension ABI;
+  public functions added (soie/layout.h): soie_set_focus_range(),
+  soie_get_focus_anchor(), soie_field_offset(), soie_field_move().
 - The site's figures are rounded so that they stay true across
   releases: "under 50,000 lines of code" (tools/loc.sh: 45,503 in
   0.1.2, 47,548 in 0.1.3, 51,661 in 0.1.4, 53,444 in 0.1.5, 54,517
-  in 0.1.6, 54,709 in 0.1.7: "under 50,000" became "under 55,000";
+  in 0.1.6, 54,709 in 0.1.7, 55,353 in 0.1.8: "under 50,000" became
+  "under 55,000", then "under 60,000";
   "about 45,000" was out of date one release later). At each release, check them all the
   same: tools/loc.sh, the WPT percentages (tests/wpt/run.sh; the site
   said 44 and 23 % until 0.1.3, when they were 62 and 46), the

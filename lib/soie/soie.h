@@ -12,7 +12,7 @@
 
 #define SOIE_VERSION_MAJOR 0
 #define SOIE_VERSION_MINOR 1
-#define SOIE_VERSION_PATCH 7
+#define SOIE_VERSION_PATCH 8
 
 #include "dom.h"
 #include "html.h"

@@ -4,8 +4,15 @@
 	<link href="https://soie.slitaz.org/"/>
 	<link rel="self" href="https://soie.slitaz.org/releases.atom"/>
 	<id>https://soie.slitaz.org/releases.atom</id>
-	<updated>2026-11-14T00:00:00Z</updated>
+	<updated>2026-11-16T00:00:00Z</updated>
 	<author><name>Christophe Lincoln</name></author>
+	<entry>
+		<title>Soie 0.1.8</title>
+		<link href="https://hg.slitaz.org/soie/rev/0.1.8"/>
+		<id>https://soie.slitaz.org/releases/0.1.8</id>
+		<updated>2026-11-16T00:00:00Z</updated>
+		<content type="html">&lt;h3&gt;Added&lt;/h3&gt;&lt;ul&gt;&lt;li&gt;Text fields edit as in other browsers (Toile, xsoie, wsoie): a click places the caret where it is; Shift+click, a drag, a double or triple click select; Shift with the arrows, Home and End selects; Ctrl+arrows move by words (Ctrl+Shift selects them); typing, paste and Backspace replace the selection; Ctrl+A, Ctrl+C, Ctrl+X work in a field. The selection is painted, a long input scrolls to keep the caret in sight. Textareas: Enter makes a new line, Up and Down move between lines, the caret is drawn.&lt;/li&gt;&lt;li&gt;Scripts: &lt;code&gt;selectionStart&lt;/code&gt;, &lt;code&gt;selectionEnd&lt;/code&gt;, &lt;code&gt;selectionDirection&lt;/code&gt;, &lt;code&gt;setSelectionRange()&lt;/code&gt; and &lt;code&gt;select()&lt;/code&gt; of inputs and textareas. A value set by a script puts the caret at its end.&lt;/li&gt;&lt;li&gt;Textareas wrap their lines at spaces, a word wider than the field is cut; Up, Down, Home and End move by the lines shown. &lt;code&gt;wrap="off"&lt;/code&gt; keeps lines whole. The text stays inside the field.&lt;/li&gt;&lt;li&gt;Library: &lt;code&gt;soie_set_focus_range()&lt;/code&gt;, &lt;code&gt;soie_get_focus_anchor()&lt;/code&gt;, &lt;code&gt;soie_field_offset()&lt;/code&gt;, &lt;code&gt;soie_field_move()&lt;/code&gt;.&lt;/li&gt;&lt;li&gt;&lt;code&gt;tools/gui-smoke.sh&lt;/code&gt;: clicks and types through a browser on its own Xvfb and fails if it crashes.&lt;/li&gt;&lt;/ul&gt;&lt;h3&gt;Fixed&lt;/h3&gt;&lt;ul&gt;&lt;li&gt;GTK view (Toile, gsoie): Tab, Shift, Control, Alt, Caps Lock and F1-F12 pressed in a text field typed their names ("TabShift"). Named keys now type nothing; pages still see them in &lt;code&gt;keydown&lt;/code&gt;.&lt;/li&gt;&lt;li&gt;GTK view: the caret of a text field did not move on screen with the arrow keys, Home and End (the text went in the right place).&lt;/li&gt;&lt;li&gt;&lt;code&gt;&amp;lt;textarea&amp;gt;&lt;/code&gt;: what was typed was not its &lt;code&gt;value&lt;/code&gt; for scripts nor in &lt;code&gt;FormData&lt;/code&gt; (DuckDuckGo's search box, a textarea, sent an empty query: Enter did nothing). A textarea already filled lost its text at the first key, and a value over 16 KB was cut when edited.&lt;/li&gt;&lt;li&gt;Scripts: &lt;code&gt;mouseup&lt;/code&gt; and &lt;code&gt;click&lt;/code&gt; on a text field saw the caret where it was before the click (&lt;code&gt;selectionStart&lt;/code&gt;). The press places it first, as in other browsers; a cancelled &lt;code&gt;mousedown&lt;/code&gt; leaves the focus where it was.&lt;/li&gt;&lt;/ul&gt;</content>
+	</entry>
 	<entry>
 		<title>Soie 0.1.7</title>
 		<link href="https://hg.slitaz.org/soie/rev/0.1.7"/>
