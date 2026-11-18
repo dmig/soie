@@ -188,6 +188,7 @@ void node_detach(struct soie_node *n);
 void layout_touch(struct soie_node *n);
 /* soie_layout_damage()'s tracking, freed with the document (damage.c) */
 void damage_free(struct soie_node *doc);
+int damage_images(struct soie_node *doc);
 /* Which style rules doc has: boxes of other rules are not kept */
 unsigned long style_serial(const struct soie_node *doc);
 

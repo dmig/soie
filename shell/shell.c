@@ -89,7 +89,10 @@ struct shell {
 		int push;		/* the history action of the load */
 		char *want;		/* the URL being loaded */
 		int restyle, relayout;	/* late style sheets, late images */
-		double laid_out;	/* when, for throttling */
+		double laid_out;	/* when the last pass ended (layout,
+					 * then its paint), for throttling */
+		double cost;		/* what it took, in seconds */
+		int cost_open;		/* ...its paint is still to come */
 		soie_node *old;		/* on screen until the new one is
 					 * laid out */
 		int old_scroll;
@@ -912,6 +915,24 @@ static int player_request(void *data, const soie_request *req,
 	return net_request(NULL, &q, res);
 }
 
+/* A pass of style and layout that began at t0 ends: what it cost,
+ * the paint that follows counts too (paint_cost()). Late resources
+ * wait according to it (apply_late()). */
+static void pass_cost(struct shell *s, double t0)
+{
+	s->page.cost = now_s() - t0;
+	s->page.cost_open = 1;
+}
+
+static void paint_cost(struct shell *s, double t0)
+{
+	if (!s->page.cost_open)
+		return;
+	s->page.cost_open = 0;
+	s->page.laid_out = now_s();
+	s->page.cost += s->page.laid_out - t0;
+}
+
 static void relayout(struct shell *s)
 {
 	soie_style_options so;
@@ -939,6 +960,7 @@ static void relayout(struct shell *s)
 	debug(2, "relayout %dx%d: style %.3f s, layout %.3f s", s->view_w,
 		s->view_h, t1 - t0, now_s() - t1);
 	layout_done(s);
+	pass_cost(s, t0);
 }
 
 static void layout_done(struct shell *s)
@@ -1901,28 +1923,48 @@ static void collect_jobs(struct shell *s, int nested)
 		start_scripts(s);
 }
 
-/* Late style sheets restyle, late images lay out again, at most every
- * 200 ms; returns ms until it should be called again, -1: nothing to
- * do. *repaint is set when it laid out. */
+/*
+ * Late style sheets and fonts restyle and paint all. Late images are
+ * given to the engine: those that change no box are painted alone
+ * (their rects are in its damage), the others lay out again. A pass
+ * waits for twice what the last one cost, layout and paint, counted
+ * from the end of its paint, 200 ms at least and 2 s at most: a slow
+ * machine takes more images per pass instead of painting back to back.
+ * What came last does not wait. Returns ms until it should be called
+ * again, -1: nothing to do. *repaint is set when there is something
+ * to paint.
+ */
 static int apply_late(struct shell *s, int *repaint)
 {
-	double wait;
+	double wait, t0;
+	int im;
 
 	if (s->page.loading == L_DOC || s->page.loading == L_STYLE ||
 	    !s->page.doc || (!s->page.restyle && !s->page.relayout))
 		return -1;
-	wait = 0.2 - (now_s() - s->page.laid_out);
+	wait = 2 * s->page.cost;
+	wait = wait < 0.2 ? 0.2 : wait > 2 ? 2 : wait;
+	wait -= now_s() - s->page.laid_out;
 	if (wait > 0 && res_pending(s, -1))
 		return (int)(wait * 1000) + 1;
+	t0 = now_s();
 	if (s->page.restyle) {
 		relayout(s);
-	} else {
-		soie_layout_document(s->page.doc, s->view_w, s->view_h);
-		layout_done(s);
+		s->damage_full = 1;
+		*repaint = 1;
+	} else if ((im = soie_layout_images(s->page.doc))) {
+		if (im == 2) {
+			soie_layout_document(s->page.doc, s->view_w,
+				s->view_h);
+			layout_done(s);
+		}
+		s->page.laid_out = now_s();
+		pass_cost(s, t0);
+		debug(2, "late images: %s %.3f s", im == 2 ? "layout" :
+			"no layout", s->page.cost);
+		*repaint = 1;
 	}
 	s->page.restyle = s->page.relayout = 0;
-	*repaint = 1;
-	s->damage_full = 1;
 	return -1;
 }
 
@@ -4057,9 +4099,12 @@ void shell_paint_rect(struct shell *s, unsigned char *rgba, int stride, int x,
 void shell_paint(struct shell *s, unsigned char *rgba, int stride)
 {
 	float r[4];
+	double t0 = now_s();
 
 	stick(s);
 	s->painted = paint_view(s, rgba, stride, 0, 0, s->view_w, s->view_h);
+	debug(3, "paint all %.3f s", now_s() - t0);
+	paint_cost(s, t0);
 	s->painted_scroll = s->page.scroll;
 	s->painted_gen = s->painted ? soie_document_generation(s->painted) : 0;
 	/* what changed until now is painted (the first call starts the
@@ -4070,11 +4115,38 @@ void shell_paint(struct shell *s, unsigned char *rgba, int stride)
 	s->pop.dirty = 0;
 }
 
+/* Add rect c (x0 y0 x1 y1) to the n of r. With one it meets it becomes
+ * their union when that is no more pixels than the two: what they
+ * share is painted once (a layout that moved the page gives rects one
+ * over the other, each most of the view). Returns the new count. */
+static int rect_add(int (*r)[4], int n, const int *c)
+{
+	int u[4], v[4], j;
+
+	memcpy(v, c, sizeof(v));
+	for (j = 0; j < n; j++) {
+		u[0] = v[0] < r[j][0] ? v[0] : r[j][0];
+		u[1] = v[1] < r[j][1] ? v[1] : r[j][1];
+		u[2] = v[2] > r[j][2] ? v[2] : r[j][2];
+		u[3] = v[3] > r[j][3] ? v[3] : r[j][3];
+		if ((u[2] - u[0]) * (u[3] - u[1]) > (v[2] - v[0]) * (v[3] -
+		    v[1]) + (r[j][2] - r[j][0]) * (r[j][3] - r[j][1]))
+			continue;
+		memcpy(v, u, sizeof(v));
+		if (j != --n)
+			memcpy(r[j], r[n], sizeof(*r));
+		j = -1;
+	}
+	memcpy(r[n], v, sizeof(v));
+	return n + 1;
+}
+
 int shell_paint_changed(struct shell *s, unsigned char *rgba, int stride,
 	int (*r)[4], int max)
 {
 	float f[4 * 32];
-	int n, i, k = 0;
+	int n, i, k = 0, px = 0;
+	double t0 = now_s();
 
 	stick(s);
 	/* room for the list's rect */
@@ -4094,27 +4166,30 @@ int shell_paint_changed(struct shell *s, unsigned char *rgba, int stride,
 		s->pop.dirty = 0;
 	}
 	for (i = 0; i < n; i++) {
-		int x0 = (int)floorf(f[i * 4]);
-		int y0 = (int)floorf(f[i * 4 + 1]) - s->page.scroll;
-		int x1 = (int)ceilf(f[i * 4] + f[i * 4 + 2]);
-		int y1 = (int)ceilf(f[i * 4 + 1] + f[i * 4 + 3]) -
-			s->page.scroll;
+		int c[4];
 
-		x0 = x0 < 0 ? 0 : x0;
-		y0 = y0 < 0 ? 0 : y0;
-		x1 = x1 > s->view_w ? s->view_w : x1;
-		y1 = y1 > s->view_h ? s->view_h : y1;
-		if (x0 >= x1 || y0 >= y1)
-			continue;
-		paint_view(s, rgba, stride, x0, y0, x1 - x0, y1 - y0);
-		r[k][0] = x0;
-		r[k][1] = y0;
-		r[k][2] = x1 - x0;
-		r[k][3] = y1 - y0;
-		k++;
+		c[0] = (int)floorf(f[i * 4]);
+		c[1] = (int)floorf(f[i * 4 + 1]) - s->page.scroll;
+		c[2] = (int)ceilf(f[i * 4] + f[i * 4 + 2]);
+		c[3] = (int)ceilf(f[i * 4 + 1] + f[i * 4 + 3]) - s->page.scroll;
+		c[0] = c[0] < 0 ? 0 : c[0];
+		c[1] = c[1] < 0 ? 0 : c[1];
+		c[2] = c[2] > s->view_w ? s->view_w : c[2];
+		c[3] = c[3] > s->view_h ? s->view_h : c[3];
+		if (c[0] < c[2] && c[1] < c[3])
+			k = rect_add(r, k, c);
+	}
+	for (i = 0; i < k; i++) {
+		/* x y w h for the front */
+		r[i][2] -= r[i][0];
+		r[i][3] -= r[i][1];
+		paint_view(s, rgba, stride, r[i][0], r[i][1], r[i][2],
+			r[i][3]);
+		px += r[i][2] * r[i][3];
 	}
 	s->painted_gen = soie_document_generation(s->page.doc);
-	debug(3, "repaint %d rects", k);
+	debug(3, "paint %d rects, %d px, %.3f s", k, px, now_s() - t0);
+	paint_cost(s, t0);
 	return k;
 }
 
@@ -4129,9 +4204,10 @@ static int page_changed(struct shell *s)
 int shell_paint_scroll(struct shell *s, unsigned char *rgba, int stride,
 	int *dy)
 {
-	int d = s->page.scroll - s->painted_scroll, y, n, i;
+	int d = s->page.scroll - s->painted_scroll, y, n, i, k = 0, px = 0;
 	size_t row = (size_t)s->view_w * 4;
 	float f[4 * 8];
+	int r[8][4];	/* x0 y0 x1 y1 in the view */
 
 	*dy = 0;
 	/* the list opened, changed or closed: its pixels are not the
@@ -4160,15 +4236,28 @@ int shell_paint_scroll(struct shell *s, unsigned char *rgba, int stride,
 		paint_view(s, rgba, stride, 0, 0, s->view_w, -d);
 	}
 	for (i = 0; i < n; i++) {
-		int y0 = (int)floorf(f[i * 4 + 1]) - s->page.scroll;
-		int y1 = (int)ceilf(f[i * 4 + 1] + f[i * 4 + 3]) -
-			s->page.scroll;
+		int c[4];
 
-		y0 = y0 < 0 ? 0 : y0;
-		y1 = y1 > s->view_h ? s->view_h : y1;
-		if (y0 < y1)
-			paint_view(s, rgba, stride, 0, y0, s->view_w, y1 - y0);
+		c[0] = (int)floorf(f[i * 4]);
+		c[1] = (int)floorf(f[i * 4 + 1]) - s->page.scroll;
+		c[2] = (int)ceilf(f[i * 4] + f[i * 4 + 2]);
+		c[3] = (int)ceilf(f[i * 4 + 1] + f[i * 4 + 3]) - s->page.scroll;
+		/* in the view, less the band just painted: a bar at the
+		 * bottom is in it already */
+		c[0] = c[0] < 0 ? 0 : c[0];
+		c[1] = c[1] < (d < 0 ? -d : 0) ? (d < 0 ? -d : 0) : c[1];
+		c[2] = c[2] > s->view_w ? s->view_w : c[2];
+		c[3] = c[3] > s->view_h - (d > 0 ? d : 0) ?
+			s->view_h - (d > 0 ? d : 0) : c[3];
+		if (c[0] < c[2] && c[1] < c[3])
+			k = rect_add(r, k, c);
 	}
+	for (i = 0; i < k; i++) {
+		paint_view(s, rgba, stride, r[i][0], r[i][1],
+			r[i][2] - r[i][0], r[i][3] - r[i][1]);
+		px += (r[i][2] - r[i][0]) * (r[i][3] - r[i][1]);
+	}
+	debug(3, "scroll %d: its band, %d rects, %d px", d, k, px);
 	s->painted_scroll = s->page.scroll;
 	*dy = d;
 	return 1;

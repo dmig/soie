@@ -65,10 +65,22 @@ int soie_paint_bgra(soie_node *doc, unsigned char *bgra, int width,
  * become their union); -1 when it may be all of it (a first layout,
  * the viewport changed, the root's or body's style). The first call starts the tracking (and returns -1): each
  * layout then compares the boxes it leaves with those it found, the
- * focus and caret count too. Images and fonts that arrive later are
- * not seen: a host paints all of it then.
+ * focus and caret count too. Images that arrive later are in it after
+ * soie_layout_images() or a layout; fonts are not seen: a host paints
+ * all of it then.
  */
 int soie_layout_damage(soie_node *doc, float *rects, int max);
+
+/*
+ * Ask again for the images the fetch callback answered
+ * SOIE_FETCH_LATER for; a paint never does, so that all of a page
+ * shows an image from the same moment. Returns 0 when none came; 1
+ * when some did and every box keeps its size: the boxes showing them
+ * are in soie_layout_damage(), painting them is enough; 2 when a box
+ * has another size: soie_layout_document() is to be called (the
+ * damage is then the layout's). A layout asks for them too.
+ */
+int soie_layout_images(soie_node *doc);
 
 /* Deepest element under page point (x, y), or NULL. */
 soie_node *soie_hit_test(soie_node *doc, float x, float y);

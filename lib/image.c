@@ -451,34 +451,13 @@ void images_setup(soie_node *doc, soie_fetch_fn fetch, void *data,
 	im->base = base ? xstrndup(base, strlen(base)) : NULL;
 }
 
-/* An image by URL (resolved against the base): fetched once. */
-const struct image *image_get(soie_node *doc, const char *url)
+/* Ask the host for x's bytes: its size, its pixels when small */
+static void image_fetch(struct images *im, struct image *x)
 {
-	struct images *im = doc->u.doc->images;
-	struct image *x;
-	char *abs, *buf = NULL;
+	char *buf = NULL;
 	size_t len = 0;
-	int i, r;
+	int r;
 
-	if (!im || !url || !*url)
-		return NULL;
-	abs = soie_url_resolve(im->base, url);
-	for (i = 0; i < im->n; i++)
-		if (!strcmp(im->v[i].url, abs)) {
-			free(abs);
-			x = &im->v[i];
-			if (x->failed == LATER)
-				goto fetch;	/* arrived by now? */
-			return x->failed ? NULL : x;
-		}
-	if (im->n == im->cap) {
-		im->cap = im->cap ? im->cap * 2 : 16;
-		im->v = xrealloc(im->v, (size_t)im->cap * sizeof(*im->v));
-	}
-	x = &im->v[im->n++];
-	memset(x, 0, sizeof(*x));
-	x->url = abs;
-fetch:
 	x->failed = 0;
 	r = im->fetch ? im->fetch(im->data, x->url, &buf, &len) : -1;
 	if (r == SOIE_FETCH_LATER) {
@@ -503,7 +482,126 @@ fetch:
 	}
 	x->owner = im;
 	free(buf);
+}
+
+/* An image by URL (resolved against the base): fetched once. One on
+ * its way (SOIE_FETCH_LATER) is asked again by images_retry() only:
+ * a paint that took it when it came would show it in the rect it
+ * paints and nowhere else. */
+const struct image *image_get(soie_node *doc, const char *url)
+{
+	struct images *im = doc->u.doc->images;
+	struct image *x;
+	char *abs;
+	int i;
+
+	if (!im || !url || !*url)
+		return NULL;
+	abs = soie_url_resolve(im->base, url);
+	for (i = 0; i < im->n; i++)
+		if (!strcmp(im->v[i].url, abs)) {
+			free(abs);
+			return im->v[i].failed ? NULL : &im->v[i];
+		}
+	if (im->n == im->cap) {
+		im->cap = im->cap ? im->cap * 2 : 16;
+		im->v = xrealloc(im->v, (size_t)im->cap * sizeof(*im->v));
+	}
+	x = &im->v[im->n++];
+	memset(x, 0, sizeof(*x));
+	x->url = abs;
+	image_fetch(im, x);
 	return x->failed ? NULL : x;
+}
+
+/* The images that were on their way are asked for again: those that
+ * came are fresh, until the boxes showing them are in the damage
+ * (damage_images()). Returns how many are. */
+int images_retry(soie_node *doc)
+{
+	struct images *im = doc->u.doc->images;
+	int i;
+
+	if (!im)
+		return 0;
+	for (i = 0; i < im->n; i++) {
+		if (im->v[i].failed != LATER)
+			continue;
+		image_fetch(im, &im->v[i]);
+		if (!im->v[i].failed) {
+			im->v[i].fresh = 1;
+			im->nfresh++;
+		}
+	}
+	return im->nfresh;
+}
+
+void images_shown(soie_node *doc)
+{
+	struct images *im = doc->u.doc->images;
+	int i;
+
+	for (i = 0; im && i < im->n; i++)
+		im->v[i].fresh = 0;
+	if (im)
+		im->nfresh = 0;
+}
+
+static int image_fresh(soie_node *doc, const char *url)
+{
+	struct images *im = doc->u.doc->images;
+	char *abs;
+	int i, r = 0;
+
+	if (!url || !*url)
+		return 0;
+	abs = soie_url_resolve(im->base, url);
+	for (i = 0; i < im->n && !r; i++)
+		r = im->v[i].fresh && !strcmp(im->v[i].url, abs);
+	free(abs);
+	return r;
+}
+
+/* One of the images of a background-image or mask-image value */
+static int layers_fresh(soie_node *doc, const char *img)
+{
+	struct cvlist li;
+	int i, r = 0;
+
+	if (!img || !strcmp(img, "none"))
+		return 0;
+	css_component_values(img, strlen(img), &li);
+	for (i = 0; i < li.n && !r; i++) {
+		const struct cv *v = &li.v[i];
+
+		if (v->type == CT_URL)
+			r = image_fresh(doc, v->str);
+		else if (cv_func(v, "url") && v->kids.n &&
+			 v->kids.v[0].type == CT_STRING)
+			r = image_fresh(doc, v->kids.v[0].str);
+	}
+	cvlist_free(&li);
+	return r;
+}
+
+/* b shows a fresh image: its own, a poster, a background or mask
+ * layer */
+int box_image_fresh(const struct box *b)
+{
+	static const char *const attrs[] = { "src", "data", "poster" };
+	soie_node *doc = b->node->doc;
+	struct images *im = doc->u.doc->images;
+	size_t i;
+
+	if (!im || !im->nfresh || !b->style)
+		return 0;
+	if (b->type == B_REPLACED)
+		for (i = 0; i < sizeof(attrs) / sizeof(*attrs); i++)
+			if (image_fresh(doc, soie_element_get_attr(b->node,
+			    attrs[i])))
+				return 1;
+	return layers_fresh(doc, b->style->v[P_BACKGROUND_IMAGE].u.str) ||
+		layers_fresh(doc, b->style->v[P_MASK_IMAGE].u.str);
 }
 
 /*

@@ -417,9 +417,51 @@ static void show_rect(SoieView *v, int x, int y, int w, int h)
 		(x + w + s - 1) / s - x / s, (y + h + s - 1) / s - y / s);
 }
 
+/*
+ * $SOIE_DEBUG_PAINT, as in xsoie (browser/front.c): after a redraw the
+ * view painted whole into another buffer must be the same (2 levels of
+ * rounding per channel), but in the players' rect.
+ */
+static void paint_check(SoieView *v, const unsigned char *px, int stride)
+{
+	int w = cairo_image_surface_get_width(v->surf);
+	int h = cairo_image_surface_get_height(v->surf);
+	unsigned char *whole = malloc((size_t)stride * (size_t)h);
+	int x, y, k, bad = 0, bx = 0, by = 0, r[4] = { 0, 0, 0, 0 };
+
+	if (!whole)
+		return;
+	shell_paint(v->sh, whole, stride);
+	shell_dirty(v->sh, &r[0], &r[1], &r[2], &r[3]);
+	for (y = 0; y < h; y++) {
+		const unsigned char *a = px + (size_t)y * (size_t)stride;
+		const unsigned char *b = whole + (size_t)y * (size_t)stride;
+
+		if (!memcmp(a, b, (size_t)w * 4))
+			continue;
+		for (x = 0; x < w; x++)
+			for (k = 0; k < 3; k++) {
+				int d = a[x * 4 + k] - b[x * 4 + k];
+
+				if (x >= r[0] && x < r[0] + r[2] && y >= r[1] &&
+				    y < r[1] + r[3])
+					break;
+				if ((d > 2 || d < -2) && !bad++) {
+					bx = x;
+					by = y;
+				}
+			}
+	}
+	if (bad)
+		fprintf(stderr, "soie: partial redraw differs: %d channels, "
+			"first at %d,%d\n", bad, bx, by);
+	free(whole);
+}
+
 /* Paint what changed and ask GTK to show it. */
 static void redraw(SoieView *v)
 {
+	static int check = -1;
 	GtkWidget *w = GTK_WIDGET(v);
 	int stride, dy, n, i, r[NRECT][4];
 	unsigned char *px;
@@ -441,6 +483,10 @@ static void redraw(SoieView *v)
 		gtk_widget_queue_draw(w);
 	}
 	v->full = v->changed = FALSE;
+	if (check < 0)
+		check = getenv("SOIE_DEBUG_PAINT") != NULL;
+	if (check)
+		paint_check(v, px, stride);
 	cairo_surface_mark_dirty(v->surf);
 	sync_adjustment(v);
 }

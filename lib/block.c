@@ -1892,7 +1892,11 @@ static float overflow_bottom(const struct box *b, float bottom, int top)
 	if (b->type != B_INLINE && b->style &&
 	    kw(b->style, P_POSITION, "fixed"))
 		return bottom;
-	y = b->y + b->h + b->p[2] + b->b[2];
+	/* inline and text boxes lie in their block's lines: their own y
+	 * is only what moved them, and adds up in a box kept from layout
+	 * to layout (a page grew 230 px at each late image) */
+	y = b->type == B_INLINE || b->type == B_TEXT || b->type == B_BREAK ?
+		bottom : b->y + b->h + b->p[2] + b->b[2];
 	if (y > bottom)
 		bottom = y;
 	for (i = 0; i < b->nlines; i++) {
@@ -1966,19 +1970,38 @@ void layout_root(struct layout *l)
  */
 
 /* What a box paints with what is below, x0 y0 x1 y1 */
-static void stick_extent(const struct box *b, float *r, int depth)
+static void stick_grow(float *r, float x0, float y0, float x1, float y1)
 {
-	const struct box *c;
-	float m = b->style ? shadow_reach(b->style) + 2 : 2;
-	float x0 = b->x - b->p[3] - b->b[3] - m;
-	float y0 = b->y - b->p[0] - b->b[0] - m;
-	float x1 = b->x + b->w + b->p[1] + b->b[1] + m;
-	float y1 = b->y + b->h + b->p[2] + b->b[2] + m;
-
 	r[0] = x0 < r[0] ? x0 : r[0];
 	r[1] = y0 < r[1] ? y0 : r[1];
 	r[2] = x1 > r[2] ? x1 : r[2];
 	r[3] = y1 > r[3] ? y1 : r[3];
+}
+
+static void stick_extent(const struct box *b, float *r, int depth)
+{
+	const struct box *c;
+	float m = b->style ? shadow_reach(b->style) + 2 : 2;
+	int i;
+
+	/* inline and text boxes lie in their block's fragments: they
+	 * have no place of their own (a fixed bar's text, left where
+	 * the page begins, had all the view painted at each step) */
+	if (b->type != B_INLINE && b->type != B_TEXT && b->type != B_BREAK)
+		stick_grow(r, b->x - b->p[3] - b->b[3] - m,
+			b->y - b->p[0] - b->b[0] - m,
+			b->x + b->w + b->p[1] + b->b[1] + m,
+			b->y + b->h + b->p[2] + b->b[2] + m);
+	for (i = 0; i < b->nfrags; i++) {
+		const struct frag *f = &b->frags[i];
+		const struct style *fs = f->box->style;
+		float em = fs ? fs->v[P_FONT_SIZE].u.len.px : 16;
+
+		/* glyphs reach out of their frag, as when painted */
+		stick_grow(r, f->x - em, f->baseline - 2 * em,
+			f->x + f->w + em, f->baseline + em);
+		stick_grow(r, f->x, f->y, f->x + f->w, f->y + f->h);
+	}
 	if (depth < 512)
 		for (c = b->first; c; c = c->next)
 			stick_extent(c, r, depth + 1);

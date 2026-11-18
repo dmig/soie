@@ -19,6 +19,8 @@
 #include <string.h>
 #include "internal.h"
 #include "layout.h"
+#include "image.h"
+#include "font.h"
 
 #define NDAMAGE 32
 
@@ -220,8 +222,14 @@ static void walk(struct table *t, const struct box *b, struct dent *d,
 		y0 = b->y - b->p[0] - b->b[0] - o;
 		x1 = b->x + b->w + b->p[1] + b->b[1] + o;
 		y1 = b->y + b->h + b->p[2] + b->b[2] + o;
-		unite(d->e, x0, y0, x1, y1);
-		unite(s, x0, y0, x1, y1);
+		/* inline and text boxes lie in their block's fragments,
+		 * below: they have no place of their own (left at the
+		 * page's origin, every rect reached up to there) */
+		if (b->type != B_INLINE && b->type != B_TEXT &&
+		    b->type != B_BREAK) {
+			unite(d->e, x0, y0, x1, y1);
+			unite(s, x0, y0, x1, y1);
+		}
 		for (i = 0; i < b->nfrags; i++) {
 			const struct frag *f = &b->frags[i];
 			const struct style *fs = f->box->style;
@@ -261,6 +269,12 @@ static void add(struct damage *dm, const float *r)
 
 	if (dm->all || r[0] >= r[2] || r[1] >= r[3])
 		return;
+	/* inside one that is there: a box that changed where it was
+	 * gives the same rect twice, old and new */
+	for (i = 0; i < dm->n; i++)
+		if (r[0] >= dm->r[i][0] && r[1] >= dm->r[i][1] &&
+		    r[2] <= dm->r[i][2] && r[3] <= dm->r[i][3])
+			return;
 	if (dm->n == NDAMAGE) {
 		/* too many: their union */
 		for (i = 1; i < NDAMAGE; i++)
@@ -367,6 +381,71 @@ void damage_node(soie_node *doc, const soie_node *el)
 	if ((e = find(&t, el)))
 		add(dm, e->s);
 	table_free(&t);
+}
+
+/* The boxes below b that show a fresh image: their elements' rects, an
+ * inline box's block (own: it holds its fragments); all when a
+ * transformed ancestor paints them elsewhere, or for the canvas'
+ * background. Returns 1 when one is to be sized again. */
+static int late_walk(struct damage *dm, const struct table *t,
+	struct box *b, const struct dent *own, int moved)
+{
+	struct box *c;
+	float m[6];
+	int need = 0;
+
+	if (b->node && b->node->type == SOIE_ELEMENT) {
+		if (b->type != B_INLINE)
+			own = find(t, b->node);
+		if (box_image_fresh(b)) {
+			if (b->type == B_REPLACED)
+				need = replaced_late(b);
+			if (dm && (moved || canvas_element(b->node)))
+				dm->all = 1;
+			else if (dm && own)
+				add(dm, own->e);
+		}
+	}
+	if (b->style && box_transform(b, m) == 2)
+		moved = 1;
+	for (c = b->first; c; c = c->next)
+		need |= late_walk(dm, t, c, own, moved);
+	return need;
+}
+
+/*
+ * Images that came since the boxes showing them were laid out or
+ * painted (images_retry()): no signature tells, their boxes are
+ * painted again. Returns 1 when a box has to be sized again, by a
+ * layout.
+ */
+int damage_images(soie_node *doc)
+{
+	struct damage *dm = doc->u.doc->damage;
+	const struct layout *l = doc->u.doc->layout;
+	struct table t = { NULL, 0, 0 };
+	float s[4];
+	int need;
+
+	if (!doc->u.doc->images || !doc->u.doc->images->nfresh || !l ||
+	    !l->root)
+		return 0;
+	font_doc = doc;		/* the zoom of natural sizes */
+	none(s);
+	table_make(&t, l->root);
+	walk(&t, l->root, NULL, dm ? dm->media : 0, s);
+	need = late_walk(dm, &t, l->root, NULL, 0);
+	table_free(&t);
+	images_shown(doc);
+	return need;
+}
+
+int soie_layout_images(soie_node *doc)
+{
+	if (doc->type != SOIE_DOCUMENT || !doc->u.doc->layout ||
+	    !images_retry(doc))
+		return 0;
+	return damage_images(doc) ? 2 : 1;
 }
 
 void damage_free(soie_node *doc)

@@ -19,6 +19,8 @@ struct image {
 	soie_node *svgdoc;	/* SVG: its own document */
 	const soie_node *svg;	/* its <svg> element */
 	int failed;
+	int fresh;		/* came after a layout or a paint went
+				 * without it: images_retry() */
 	/* A video frame: every alpha is 255 (opaque), red and blue are
 	 * swapped (bgr). Opaque and in the canvas' order, it is copied
 	 * by rows when drawn at its own size. */
@@ -39,6 +41,7 @@ struct images {
 	void *data;
 	char *base;
 	size_t pixels;		/* bytes of large images decoded now */
+	int nfresh;		/* images with fresh set */
 	unsigned long tick;
 };
 
@@ -47,6 +50,9 @@ void images_setup(soie_node *doc, soie_fetch_fn fetch, void *data,
 void images_free(struct images *im);
 const struct image *image_get(soie_node *doc, const char *url);
 const struct image *image_for(const soie_node *el);
+int images_retry(soie_node *doc);
+void images_shown(soie_node *doc);
+int box_image_fresh(const struct box *b);
 void draw_image(struct canvas *c, const struct image *im, float x, float y,
 	float w, float h, const unsigned char *current,
 	const struct style *st);

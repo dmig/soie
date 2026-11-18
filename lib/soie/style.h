@@ -19,7 +19,8 @@
  * its size; -1 on failure. A host that loads in the background returns
  * SOIE_FETCH_LATER while the bytes are on their way: the library goes
  * on without them and asks again at the next soie_style_document()
- * (style sheets, fonts) or layout and paint (images). The engine never
+ * (style sheets, fonts), layout or soie_layout_images() (images). The
+ * engine never
  * opens a socket: this is the host's job.
  */
 #define SOIE_FETCH_LATER 1

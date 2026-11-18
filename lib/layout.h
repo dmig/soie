@@ -217,6 +217,9 @@ void rel_offset(const struct box *b, float cbw, float *dx, float *dy);
  * more (painted through it) */
 int box_transform(const struct box *b, float *m);
 
+/* boxes.c */
+int replaced_late(struct box *b);
+
 /* inline.c */
 /* cbh: b's content height when definite (percentage heights of its
  * atomics), else -1 */

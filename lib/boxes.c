@@ -682,6 +682,33 @@ static int replaced_same(const struct box *b)
 	return 1;
 }
 
+/*
+ * The image of replaced box b came after b was sized. Returns 0 when
+ * the box stays as it is: the natural size it was given (its width
+ * and height attributes), a width and a height of its own, or one of
+ * them and the same ratio. 1 when the layout has to size it again; a
+ * flex or grid item always, their sizes look at the natural ones.
+ */
+int replaced_late(struct box *b)
+{
+	struct box t = *b;
+	int w, h;
+
+	intrinsic(&t, b->node);
+	if (t.iw == b->iw && t.ih == b->ih)
+		return 0;
+	w = box_spec_w(b, P_WIDTH, -1) >= 0;
+	h = box_spec_h(b, P_HEIGHT, -1) >= 0;
+	if ((b->parent && is_flexgrid(b->parent)) || (!w && !h) ||
+	    ((!w || !h) && (box_ratio_h(b, 1000) <= 0 ||
+	    box_ratio_h(b, 1000) != box_ratio_h(&t, 1000))))
+		return 1;
+	/* what the next layout compares (replaced_same()) */
+	b->iw = t.iw;
+	b->ih = t.ih;
+	return 0;
+}
+
 /* The boxes below belong to the new tree now */
 static void retag(struct box *b)
 {
@@ -1338,6 +1365,8 @@ int soie_layout_document(soie_node *doc, int width, int height)
 	 * (styledb_free() clears them), the fonts too (fonts_drop_*) */
 	font_doc = doc;
 	damage_before(doc);
+	/* the images that were on their way */
+	images_retry(doc);
 	if (old)
 		stick_undo(old);
 	old_tree = old && old->rules == l->rules ? old : NULL;
@@ -1357,6 +1386,8 @@ int soie_layout_document(soie_node *doc, int width, int height)
 	doc->u.doc->lay_h = (int)l->height;
 	stick_apply(doc, l, 0);
 	damage_after(doc);
+	/* images this layout took: kept boxes show them too */
+	damage_images(doc);
 	return 0;
 }
 
