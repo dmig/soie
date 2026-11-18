@@ -23,6 +23,10 @@ struct canvas {
 	 * them), NULL without a mask */
 	unsigned char *mask;
 	int mx0, my0, mx1, my1;
+	/* A video box whose opaque frame fills all of this canvas: what
+	 * is painted before it would not show and is skipped, until
+	 * paint_media() of that box clears this; NULL otherwise */
+	const struct box *cover;
 };
 
 /* The mask's alpha at pixel x, y; 255 without one */
@@ -60,6 +64,7 @@ static inline int iceil(float v)
 }
 
 extern soie_node *paint_doc;
+extern unsigned paint_pass;	/* counts the paints: soie_paint() calls */
 
 /* The polygon of n points x, y (page coordinates), anti-aliased:
  * marks of form controls (svg.c) */
@@ -71,6 +76,8 @@ void fill_round(struct canvas *c, float x, float y, float w, float h,
 void fill_rect(struct canvas *c, float x, float y, float w, float h,
 	const unsigned char *rgba);
 void paint_replaced(struct canvas *c, const struct box *b);
+int media_frame_rect(soie_node *doc, int i, int bgr, const struct box **b,
+	int *r);
 void paint_bg_image(struct canvas *c, const struct box *b, float x,
 	float y, float w, float h);
 void paint_layers_of(struct canvas *c, const struct box *b, int img_p,

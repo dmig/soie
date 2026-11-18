@@ -16,6 +16,8 @@
 #include "paint.h"
 
 soie_node *paint_doc;
+unsigned paint_pass;
+unsigned paint_covered;	/* parts painted under cover: for the tests */
 
 static void clip_to(struct canvas *c, float x0, float y0, float x1,
 	float y1)
@@ -183,21 +185,32 @@ static int solid(const struct canvas *c, const unsigned char *rgba)
 	return rgba[3] == 255 && c->alpha == 1 && !c->mask;
 }
 
-/* Pixels i0 to i1 (excluded) of row j fully covered by a solid color:
- * what blend() would give them, one store each */
+/* Pixels i0 to i1 (excluded) of row j fully covered by a color, no
+ * mask: what blend() would give them, one store each when solid, the
+ * alpha worked out once when not (the shade of a video's controls) */
 static void fill_span(struct canvas *c, int j, int i0, int i1,
 	const unsigned char *rgba)
 {
 	unsigned char v[4], *p;
-	int r = c->bgr ? 2 : 0;
+	int r = c->bgr ? 2 : 0, a;
 
 	v[0] = rgba[r];
 	v[1] = rgba[1];
 	v[2] = rgba[2 - r];
 	v[3] = 255;
 	p = c->px + (size_t)j * (size_t)c->stride + (size_t)i0 * 4;
-	for (; i0 < i1; i0++, p += 4)
-		memcpy(p, v, 4);
+	a = (int)((float)rgba[3] * c->alpha + 0.5f);
+	if (a >= 255) {
+		for (; i0 < i1; i0++, p += 4)
+			memcpy(p, v, 4);
+		return;
+	}
+	for (; a > 0 && i0 < i1; i0++, p += 4) {
+		p[0] = (unsigned char)div255(v[0] * a + p[0] * (255 - a));
+		p[1] = (unsigned char)div255(v[1] * a + p[1] * (255 - a));
+		p[2] = (unsigned char)div255(v[2] * a + p[2] * (255 - a));
+		p[3] = (unsigned char)(a + div255(p[3] * (255 - a)));
+	}
 }
 
 /* Rectangle with anti-aliased edges, page coordinates. */
@@ -207,7 +220,7 @@ void fill_rect(struct canvas *c, float x, float y, float w, float h,
 	float x0 = x - c->ox, y0 = y - c->oy, x1 = x0 + w, y1 = y0 + h;
 	int ix0, iy0, ix1, iy1, i, j, fx0, fx1, fy0, fy1;
 
-	if (w <= 0 || h <= 0 || !rgba[3])
+	if (w <= 0 || h <= 0 || !rgba[3] || c->cover)
 		return;
 	ix0 = ifloor(x0);
 	iy0 = ifloor(y0);
@@ -225,7 +238,7 @@ void fill_rect(struct canvas *c, float x, float y, float w, float h,
 	fx0 = iceil(x0) > ix0 ? iceil(x0) : ix0;
 	fx1 = ifloor(x1) < ix1 ? ifloor(x1) : ix1;
 	fy0 = iceil(y0);
-	fy1 = solid(c, rgba) && fx0 < fx1 ? ifloor(y1) : fy0;
+	fy1 = !c->mask && fx0 < fx1 ? ifloor(y1) : fy0;
 	for (j = iy0; j < iy1; j++) {
 		float cy = fminf(y1, (float)j + 1) - fmaxf(y0, (float)j);
 
@@ -352,7 +365,7 @@ static void fill_rrect(struct canvas *c, float x, float y, float w, float h,
 {
 	int i, j, i0, j0, i1, j1, f0 = 0, f1 = 0, g0 = 0, g1 = 0;
 
-	if (w <= 0 || h <= 0 || !rgba[3])
+	if (w <= 0 || h <= 0 || !rgba[3] || c->cover)
 		return;
 	i0 = ifloor(x - c->ox);
 	j0 = ifloor(y - c->oy);
@@ -497,6 +510,8 @@ static void draw_text(struct canvas *c, const struct style *st,
 	int n, k, want = (int)st->v[P_FONT_WEIGHT].u.num;
 	int italic = !kw(st, P_FONT_STYLE, "normal");
 
+	if (c->cover)
+		return;
 	{
 		/* -webkit-text-fill-color when set (kept as text: its
 		 * currentcolor is each element's), else the color */
@@ -884,6 +899,23 @@ static int round_push(struct canvas *c, float x, float y, float w, float h,
 		x1 = x0;
 	if (y1 < y0)
 		y1 = y0;
+	/* The clip is inside the rectangle and reaches none of its corner
+	 * squares (a band of a tall rounded box, a video's frame): every
+	 * pixel would be covered whole, as rrect_cov() says of the one
+	 * nearest to each corner. No mask then, what is painted is as
+	 * it would be under one. */
+	if (x1 > x0 && y1 > y0 && c->cx0 == x0 && c->cy0 == y0 &&
+	    c->cx1 == x1 && c->cy1 == y1) {
+		float px0 = (float)x0 + c->ox, py0 = (float)y0 + c->oy;
+		float px1 = (float)x1 + c->ox, py1 = (float)y1 + c->oy;
+
+		if (px0 >= x && px1 <= x + w && py0 >= y && py1 <= y + h &&
+		    (px0 >= x + r[0] || py0 >= y + r[4]) &&
+		    (px1 <= x + w - r[1] || py0 >= y + r[5]) &&
+		    (px1 <= x + w - r[2] || py1 <= y + h - r[6]) &&
+		    (px0 >= x + r[3] || py1 <= y + h - r[7]))
+			return 0;
+	}
 	m = malloc((size_t)(x1 - x0) * (size_t)(y1 - y0) + 1);
 	if (!m)
 		abort();
@@ -1346,8 +1378,8 @@ static void paint_decor(struct canvas *c, const struct box *b, float x,
 	int i, n = shadows(b->style, sh);
 	float sx = x, sy = y, sw = w, shh = h, r[8], ir[8];
 
-	if (text_mask_pass)
-		return;
+	if (text_mask_pass || c->cover)
+		return;		/* (cover: all of it under a video's frame) */
 	if (n) {
 		snap(c, &sx, &sy, &sw, &shh);
 		radii(b, sw, shh, r);
@@ -1880,6 +1912,9 @@ static int paint_transformed(struct canvas *c, struct box *b, const float *m)
 	int i, j, k, x0, y0, x1, y1, ch = c->bgr ? 2 : 0;
 
 	(void)ch;
+	if (c->cover)
+		return 1;	/* under a video's frame, or holding it: then
+				 * the canvas is painted again */
 	subtree_bounds(b, r, 0);
 	if (r[2] <= r[0] || r[3] <= r[1])
 		return 1;
@@ -2279,6 +2314,8 @@ static void canvas_background(struct canvas *c, struct box *root)
 			style_rgba(src->style, P_BACKGROUND_COLOR, bg);
 		}
 	}
+	if (c->cover)
+		return;
 	for (j = 0; j < c->h; j++)
 		for (i = 0; i < c->w; i++)
 			memcpy(c->px + (size_t)j * (size_t)c->stride +
@@ -2288,38 +2325,186 @@ static void canvas_background(struct canvas *c, struct box *root)
 	paint_bg_canvas(c, src);
 }
 
+/*
+ * The pixels x0, y0 to x1, y1 (page coordinates) of the canvas whose
+ * pixel (0, 0) is at sx, sy. cover: a video box whose frame fills all
+ * of them, nothing over it but what is painted after it: the page
+ * under it is not painted, which is most of what a frame costs. If
+ * that box then does not paint over everything (a clip, a mask, an
+ * opacity, a transform on the way, known when its turn comes: see
+ * paint_media()), the rectangle is painted again whole.
+ */
+static void paint_part(struct box *root, unsigned char *px, int stride,
+	int sx, int sy, int bgr, int x0, int y0, int x1, int y1,
+	const struct box *cover)
+{
+	struct canvas c;
+
+	if (x1 <= x0 || y1 <= y0)
+		return;
+	for (;;) {
+		memset(&c, 0, sizeof(c));
+		c.px = px + (size_t)(y0 - sy) * (size_t)stride +
+			(size_t)(x0 - sx) * 4;
+		c.w = x1 - x0;
+		c.h = y1 - y0;
+		c.stride = stride;
+		c.ox = (float)x0;
+		c.oy = (float)y0;
+		c.cx1 = c.w;
+		c.cy1 = c.h;
+		c.alpha = 1;
+		c.bgr = bgr;
+		c.cover = cover;
+		canvas_background(&c, root);
+		nz = 0;
+		paint_context(&c, root);
+		free(zlist);
+		zlist = NULL;
+		nz = capz = 0;
+		if (!c.cover) {
+			paint_covered += cover != NULL;
+			return;
+		}
+		cover = NULL;
+	}
+}
+
+/*
+ * What the opaque frame of a video fills of the canvas (x0, y0, x1, y1
+ * in r, page coordinates), clear of the round corners of its box: the
+ * rows between the corners (r), and of the corners' rows above and
+ * below what lies between them (t, u; empty without corners). The
+ * box, NULL when no video is worth it.
+ */
+static const struct box *covered(soie_node *doc, int bgr, int *r, int *t,
+	int *u)
+{
+	const struct box *b, *best = NULL;
+	int f[4], m[4], i, k;
+	int out[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+	for (i = 0; media_frame_rect(doc, i, bgr, &b, f); i++) {
+		float x, y, w, h, rr[8], ir[8], e[4], top, bottom;
+		int tt[4], uu[4];
+
+		if (!b)
+			continue;
+		/* its content box's curves, as round_clip() makes them */
+		x = b->x - b->p[3] - b->b[3];
+		y = b->y - b->p[0] - b->b[0];
+		w = b->w + b->p[1] + b->p[3] + b->b[1] + b->b[3];
+		h = b->h + b->p[0] + b->p[2] + b->b[0] + b->b[2];
+		w = roundf(x + w) - roundf(x);
+		h = roundf(y + h) - roundf(y);
+		x = roundf(x);
+		y = roundf(y);
+		radii(b, w, h, rr);
+		for (k = 0; k < 4; k++)
+			e[k] = b->b[k] + b->p[k];
+		inset_radii(rr, e, ir);
+		top = ir[0] || ir[1] ? fmaxf(ir[4], ir[5]) : 0;
+		bottom = ir[2] || ir[3] ? fmaxf(ir[6], ir[7]) : 0;
+		/* inside the content box and the canvas */
+		f[0] = f[0] > iceil(x + e[3]) ? f[0] : iceil(x + e[3]);
+		f[1] = f[1] > iceil(y + e[0]) ? f[1] : iceil(y + e[0]);
+		f[2] = f[2] < ifloor(x + w - e[1]) ? f[2] : ifloor(x + w - e[1]);
+		f[3] = f[3] < ifloor(y + h - e[2]) ? f[3] : ifloor(y + h - e[2]);
+		memcpy(m, f, sizeof(m));
+		if (iceil(y + e[0] + top) > m[1])
+			m[1] = iceil(y + e[0] + top);
+		if (ifloor(y + h - e[2] - bottom) < m[3])
+			m[3] = ifloor(y + h - e[2] - bottom);
+		memcpy(tt, f, sizeof(tt));
+		tt[0] = iceil(x + e[3] + ir[0]);
+		tt[2] = ifloor(x + w - e[1] - ir[1]);
+		tt[3] = m[1];
+		memcpy(uu, f, sizeof(uu));
+		uu[0] = iceil(x + e[3] + ir[3]);
+		uu[2] = ifloor(x + w - e[1] - ir[2]);
+		uu[1] = m[3];
+		for (k = 0; k < 2; k++) {
+			m[k] = m[k] < r[k] ? r[k] : m[k];
+			tt[k] = tt[k] < r[k] ? r[k] : tt[k];
+			uu[k] = uu[k] < r[k] ? r[k] : uu[k];
+			m[k + 2] = m[k + 2] > r[k + 2] ? r[k + 2] : m[k + 2];
+			tt[k + 2] = tt[k + 2] > r[k + 2] ? r[k + 2] : tt[k + 2];
+			uu[k + 2] = uu[k + 2] > r[k + 2] ? r[k + 2] : uu[k + 2];
+		}
+		tt[0] = tt[0] < m[0] ? m[0] : tt[0];
+		tt[2] = tt[2] > m[2] ? m[2] : tt[2];
+		uu[0] = uu[0] < m[0] ? m[0] : uu[0];
+		uu[2] = uu[2] > m[2] ? m[2] : uu[2];
+		if (m[2] - m[0] < 32 || m[3] - m[1] < 32)
+			continue;
+		if (!best || (long)(m[2] - m[0]) * (m[3] - m[1]) >
+		    (long)(out[2] - out[0]) * (out[3] - out[1])) {
+			best = b;
+			memcpy(out, m, sizeof(m));
+			memcpy(out + 4, tt, sizeof(tt));
+			memcpy(out + 8, uu, sizeof(uu));
+		}
+	}
+	if (best) {
+		memcpy(r, out, 4 * sizeof(*r));
+		memcpy(t, out + 4, 4 * sizeof(*t));
+		memcpy(u, out + 8, 4 * sizeof(*u));
+	}
+	return best;
+}
+
 static int paint(soie_node *doc, unsigned char *rgba, int width, int height,
 	int stride, int sx, int sy, int bgr)
 {
-	struct canvas c;
 	struct box *root;
+	const struct box *cover;
+	int r[4], t[4], u[4], x1 = sx + width, y1 = sy + height;
 
 	if (doc->type != SOIE_DOCUMENT || !doc->u.doc->layout)
 		return -1;
 	root = doc->u.doc->layout->root;
-	memset(&c, 0, sizeof(c));
-	c.px = rgba;
-	c.w = width;
-	c.h = height;
-	c.stride = stride;
-	c.ox = (float)sx;
-	c.oy = (float)sy;
-	c.cx1 = width;
-	c.cy1 = height;
-	c.alpha = 1;
-	c.bgr = bgr;
 	font_doc = doc;
 	paint_doc = doc;
+	paint_pass++;
 	if (!root) {
 		memset(rgba, 255, (size_t)stride * (size_t)height);
 		return 0;
 	}
-	canvas_background(&c, root);
-	nz = 0;
-	paint_context(&c, root);
-	free(zlist);
-	zlist = NULL;
-	nz = capz = 0;
+	r[0] = sx;
+	r[1] = sy;
+	r[2] = x1;
+	r[3] = y1;
+	cover = covered(doc, bgr, r, t, u);
+	if (!cover) {
+		paint_part(root, rgba, stride, sx, sy, bgr, sx, sy, x1, y1, NULL);
+		return 0;
+	}
+	/*
+	 * A video plays: its frame, in three parts clear of its corners,
+	 * then the rest around them, by bands (painting is a translation:
+	 * a part shows what the whole would). The rest is the corners and
+	 * the border when the canvas is the video's box, a few hundred
+	 * pixels where the page under the frame was painted whole, four
+	 * layers deep.
+	 */
+	if (t[3] <= t[1] || t[2] <= t[0])
+		t[0] = t[2] = r[0], t[1] = t[3] = r[1];
+	if (u[3] <= u[1] || u[2] <= u[0])
+		u[0] = u[2] = r[0], u[1] = u[3] = r[3];
+#define PART(x0, y0, x1, y1, cover) \
+	paint_part(root, rgba, stride, sx, sy, bgr, x0, y0, x1, y1, cover)
+	PART(r[0], r[1], r[2], r[3], cover);
+	PART(t[0], t[1], t[2], t[3], cover);
+	PART(u[0], u[1], u[2], u[3], cover);
+	PART(sx, sy, x1, t[1], NULL);
+	PART(sx, t[1], t[0], t[3], NULL);
+	PART(t[2], t[1], x1, t[3], NULL);
+	PART(sx, r[1], r[0], r[3], NULL);
+	PART(r[2], r[1], x1, r[3], NULL);
+	PART(sx, u[1], u[0], u[3], NULL);
+	PART(u[2], u[1], x1, u[3], NULL);
+	PART(sx, u[3], x1, y1, NULL);
+#undef PART
 	return 0;
 }
 

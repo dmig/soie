@@ -1932,6 +1932,8 @@ void svg_render(struct canvas *c, const soie_node *el, float x, float y,
 	struct mat m = { 1, 0, 0, 1, 0, 0 };
 	struct paintstate ps;
 
+	if (c->cover)
+		return;		/* under a video's frame */
 	memset(&ps, 0, sizeof(ps));
 	ps.fill[3] = 255;	/* black */
 	ps.has_fill = 1;

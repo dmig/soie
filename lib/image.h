@@ -19,6 +19,10 @@ struct image {
 	soie_node *svgdoc;	/* SVG: its own document */
 	const soie_node *svg;	/* its <svg> element */
 	int failed;
+	/* A video frame: every alpha is 255 (opaque), red and blue are
+	 * swapped (bgr). Opaque and in the canvas' order, it is copied
+	 * by rows when drawn at its own size. */
+	int opaque, bgr;
 	/* Large images keep their encoded bytes and are decoded when
 	 * painted, within a budget (see image_pixels()) */
 	unsigned char *data;
@@ -53,6 +57,11 @@ void svg_size(const soie_node *el, float em, float *w, float *h);
 int decode_image(const unsigned char *data, size_t len, struct image *im);
 void draw_fitted(struct canvas *c, const struct box *b,
 	const struct image *im, const unsigned char *current);
+void fit_rect(const struct box *b, float iw, float ih, float *x, float *y,
+	float *w, float *h);
+void draw_placed(struct canvas *c, const struct box *b,
+	const struct image *im, float x, float y, float w, float h,
+	const unsigned char *current);
 void paint_media(struct canvas *c, const struct box *b);
 
 #endif

@@ -41,6 +41,9 @@ static int page_request(void *data, const soie_request *req,
 	return q->fn(q->data, &r, res);
 }
 
+#define MEDIA_HOOK(e, hook) SOIE_EXT_HOOK(e, struct soie_ext_media, hook)
+#define SOURCE_HOOK MEDIA_HOOK
+
 struct player {
 	struct preq *req;	/* NULL: fed by a script */
 	soie_node *el;
@@ -48,6 +51,14 @@ struct player {
 	void *p;
 	soie_media_state last;	/* for events and repaints */
 	double reported;	/* time of the last timeupdate */
+	/* What a paint shows, asked once per paint (pass): the extension
+	 * may give another frame at each call, the bands of one paint
+	 * show the same. fr: the pixels the frame goes to, x0, y0, x1,
+	 * y1 in page coordinates. */
+	unsigned pass;
+	soie_media_state pst;
+	struct image frame;
+	int fr[4];
 };
 
 struct media {
@@ -264,7 +275,6 @@ int soie_media_get_state(soie_node *el, soie_media_state *st)
 
 /* Media Source Extensions */
 
-#define SOURCE_HOOK(e, hook) SOIE_EXT_HOOK(e, struct soie_ext_media, hook)
 
 int soie_media_source_supported(const char *type)
 {
@@ -399,9 +409,20 @@ int soie_media_tick(soie_node *doc, int *repaint)
 /* p's box joins rect (x0, y0, x1, y1); 0 when it has none */
 static int add_rect(const struct player *p, float *u, int any)
 {
+	const struct box *b = element_box(p->el);
 	float x, y, w, h;
 
-	if (soie_element_rect(p->el, &x, &y, &w, &h) || w <= 0 || h <= 0)
+	if (b && b->type == B_REPLACED) {
+		/* frames and controls are in its content box: the border
+		 * and its round corners' outside stay as they are */
+		x = b->x;
+		y = b->y;
+		w = b->w;
+		h = b->h;
+	} else if (soie_element_rect(p->el, &x, &y, &w, &h)) {
+		return any;
+	}
+	if (w <= 0 || h <= 0)
 		return any;
 	if (!any) {
 		u[0] = x;
@@ -468,9 +489,16 @@ int soie_media_tick_rect(soie_node *doc, int *repaint, float *rect)
 		if (st.error && !p->last.error)
 			fire(&q, p->el, "error");
 		p->last = st;
-		if (!st.paused && !st.ended && !st.error)
-			next = 20;
-		else if (!p->req && !st.error && !st.ended &&
+		if (!st.paused && !st.ended && !st.error) {
+			/* when the next frame is due: 60 a second show as
+			 * 60, and 24 do not cost 50 ticks */
+			int (*due)(void *) = MEDIA_HOOK(p->ext, next_frame);
+			int d = due ? due(p->p) : -1;
+
+			d = d < 0 || d > 20 ? 20 : d < 1 ? 1 : d;
+			if (next < 0 || d < next)
+				next = d;
+		} else if (!p->req && !st.error && !st.ended &&
 			 (next < 0 || next > 250))
 			next = 250;	/* a script feeds it: data comes */
 	}
@@ -539,6 +567,96 @@ static void play_icon(struct canvas *c, float x, float y, float size,
 	}
 }
 
+/* p's state and frame for this paint, asked at its first use */
+static void pass_begin(struct player *p, const struct box *b, int bgr)
+{
+	const unsigned char *(*frame_for)(void *, int, int, int, int *,
+		int *, int *) = MEDIA_HOOK(p->ext, frame_for);
+	float x, y, w, h;
+	int flags = 0;
+
+	if (p->pass == paint_pass)
+		return;
+	p->pass = paint_pass;
+	memset(&p->pst, 0, sizeof(p->pst));
+	p->ext->state(p->p, &p->pst);
+	memset(&p->frame, 0, sizeof(p->frame));
+	memset(p->fr, 0, sizeof(p->fr));
+	if (strcmp(p->el->name, "video"))
+		return;
+	if (p->pst.width > 0 && p->pst.height > 0 && b->w > 0 && b->h > 0) {
+		/* on whole pixels, as browsers place it: a frame made at
+		 * that size is then copied, not sampled */
+		fit_rect(b, (float)p->pst.width * doc_zoom(),
+			(float)p->pst.height * doc_zoom(), &x, &y, &w, &h);
+		p->fr[0] = (int)roundf(x);
+		p->fr[1] = (int)roundf(y);
+		p->fr[2] = (int)roundf(x + w);
+		p->fr[3] = (int)roundf(y + h);
+	}
+	if (frame_for)
+		p->frame.rgba = (unsigned char *)frame_for(p->p,
+			p->fr[2] - p->fr[0], p->fr[3] - p->fr[1], bgr,
+			&p->frame.w, &p->frame.h, &flags);
+	else if (p->ext->frame)
+		p->frame.rgba = (unsigned char *)p->ext->frame(p->p,
+			&p->frame.w, &p->frame.h);
+	p->frame.bgr = (flags & SOIE_FRAME_BGRA) != 0;
+	p->frame.opaque = (flags & SOIE_FRAME_OPAQUE) != 0;
+	if (p->frame.w <= 0 || p->frame.h <= 0 || p->fr[2] <= p->fr[0] ||
+	    p->fr[3] <= p->fr[1])
+		p->frame.rgba = NULL;
+}
+
+/*
+ * For paint(): the i-th player's box when its frame is opaque (NULL
+ * otherwise) and the pixels of its content box the frame fills, r =
+ * x0, y0, x1, y1 in page coordinates. 0 past the last player.
+ */
+int media_frame_rect(soie_node *doc, int i, int bgr, const struct box **b,
+	int *r)
+{
+	struct media *m = doc->u.doc->media;
+	struct player *p;
+	const struct box *k;
+
+	if (!m || i >= m->n)
+		return 0;
+	p = &m->v[i];
+	*b = NULL;
+	k = element_box(p->el);
+	if (!k || k->type != B_REPLACED || !k->style)
+		return 1;
+	pass_begin(p, k, bgr);
+	if (!p->frame.rgba || !p->frame.opaque)
+		return 1;
+	r[0] = p->fr[0] > iceil(k->x) ? p->fr[0] : iceil(k->x);
+	r[1] = p->fr[1] > iceil(k->y) ? p->fr[1] : iceil(k->y);
+	r[2] = p->fr[2] < ifloor(k->x + k->w) ? p->fr[2] : ifloor(k->x + k->w);
+	r[3] = p->fr[3] < ifloor(k->y + k->h) ? p->fr[3] : ifloor(k->y + k->h);
+	*b = k;
+	return 1;
+}
+
+/* Black where the frame (pixels r) leaves b's content box bare */
+static void letterbox(struct canvas *c, const struct box *b, const int *r)
+{
+	static const unsigned char black[4] = { 0, 0, 0, 255 };
+	float x0 = (float)r[0], y0 = (float)r[1], x1 = (float)r[2];
+	float y1 = (float)r[3];
+
+	if (y0 > b->y)
+		fill_rect(c, b->x, b->y, b->w, y0 - b->y, black);
+	if (y1 < b->y + b->h)
+		fill_rect(c, b->x, y1, b->w, b->y + b->h - y1, black);
+	y0 = y0 > b->y ? y0 : b->y;
+	y1 = y1 < b->y + b->h ? y1 : b->y + b->h;
+	if (x0 > b->x)
+		fill_rect(c, b->x, y0, x0 - b->x, y1 - y0, black);
+	if (x1 < b->x + b->w)
+		fill_rect(c, x1, y0, b->x + b->w - x1, y1 - y0, black);
+}
+
 void paint_media(struct canvas *c, const struct box *b)
 {
 	static const unsigned char black[4] = { 0, 0, 0, 255 };
@@ -548,7 +666,6 @@ void paint_media(struct canvas *c, const struct box *b)
 	const soie_node *el = b->node;
 	struct player *p = find(el);
 	soie_media_state st;
-	struct image frame;
 	const char *poster;
 	const struct image *im = NULL;
 	int video = !strcmp(el->name, "video"), shown = 0;
@@ -557,16 +674,37 @@ void paint_media(struct canvas *c, const struct box *b)
 	memset(&st, 0, sizeof(st));
 	st.paused = 1;
 	if (p) {
-		memset(&st, 0, sizeof(st));
-		p->ext->state(p->p, &st);
+		pass_begin(p, b, c->bgr);
+		st = p->pst;
 	}
 	if (video) {
-		memset(&frame, 0, sizeof(frame));
-		if (p && p->ext->frame &&
-		    (frame.rgba = (unsigned char *)p->ext->frame(p->p,
-		     &frame.w, &frame.h)) && frame.w > 0 && frame.h > 0) {
-			fill_rect(c, b->x, b->y, b->w, b->h, black);
-			draw_fitted(c, b, &frame, NULL);
+		if (p && p->frame.rgba) {
+			const int *r = p->fr;
+
+			/*
+			 * The frame hides all this canvas shows: what was
+			 * to be painted under it was not (paint.c, cover).
+			 * Anything in the way, a clip, a mask, an opacity,
+			 * and the canvas is painted again without that.
+			 */
+			if (c->cover == b && p->frame.opaque && c->alpha == 1 &&
+			    !c->mask && !c->cx0 && !c->cy0 && c->cx1 == c->w &&
+			    c->cy1 == c->h &&
+			    (float)r[0] <= c->ox && (float)r[1] <= c->oy &&
+			    (float)r[2] >= c->ox + (float)c->w &&
+			    (float)r[3] >= c->oy + (float)c->h &&
+			    ifloor(b->x - c->ox) <= 0 &&
+			    ifloor(b->y - c->oy) <= 0 &&
+			    iceil(b->x + b->w - c->ox) >= c->w &&
+			    iceil(b->y + b->h - c->oy) >= c->h)
+				c->cover = NULL;
+			if (p->frame.opaque)
+				letterbox(c, b, r);
+			else
+				fill_rect(c, b->x, b->y, b->w, b->h, black);
+			draw_placed(c, b, &p->frame, (float)r[0], (float)r[1],
+				(float)(r[2] - r[0]), (float)(r[3] - r[1]),
+				NULL);
 			shown = 1;
 		} else if ((poster = soie_element_get_attr(el, "poster")) &&
 			   (im = image_get(el->doc, poster))) {

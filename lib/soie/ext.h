@@ -12,9 +12,11 @@
  * - any hook may be NULL;
  * - strings returned by hooks are malloc()ed and freed by the caller.
  *
- * This is ABI 0.1: until 1.0 it may still change, extensions are
+ * This is ABI 0.2: until 1.0 it may still change, extensions are
  * built with the engine they run in. From 1.0 on, minor versions
- * only append hooks to the hook sets and add kinds.
+ * only append hooks to the hook sets and add kinds. (0.2 appended
+ * frame_for and next_frame to the media hooks: a 0.1 media extension
+ * and a 0.2 engine, or the reverse, play together.)
  *
  * A module for soie_ext_load() exports "int soie_ext_init(void)",
  * which registers its hook sets with soie_ext_register() and returns
@@ -32,7 +34,7 @@
 #include "dom.h"
 
 #define SOIE_EXT_ABI_MAJOR 0
-#define SOIE_EXT_ABI_MINOR 1
+#define SOIE_EXT_ABI_MINOR 2
 #define SOIE_EXT_ABI (SOIE_EXT_ABI_MAJOR << 16 | SOIE_EXT_ABI_MINOR)
 
 typedef enum {
@@ -339,6 +341,24 @@ struct soie_ext_media {
 	int (*buffered)(void *player, int id, double *ranges, int max);
 	/* SOIE_SOURCE_* operations on buffer id */
 	void (*source)(void *player, int op, int id, double a, double b);
+
+	/* Since ABI 0.2 */
+	/* The frame to show now, as frame() gives it, and what the page
+	 * does with it: shown at want_w x want_h pixels on a canvas in
+	 * B G R A order (bgra) or R G B A. Frames decoded from then on
+	 * may come at that size and in that order, to be copied as they
+	 * are; *flags (SOIE_FRAME_*) says what this one is. The state's
+	 * width and height stay the video's own. */
+	const unsigned char *(*frame_for)(void *player, int want_w,
+		int want_h, int bgra, int *w, int *h, int *flags);
+	/* ms until the next frame is due, 0 when one is, -1 when none
+	 * waits: when to call soie_media_tick() again. */
+	int (*next_frame)(void *player);
+};
+
+enum {
+	SOIE_FRAME_BGRA = 1,	/* B G R A, not R G B A */
+	SOIE_FRAME_OPAQUE = 2	/* every alpha is 255 */
 };
 
 enum {

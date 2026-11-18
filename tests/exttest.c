@@ -405,9 +405,11 @@ static void test_media(void)
 	const struct soie_ext_media *e;
 	soie_media_state st;
 	const unsigned char *px;
+	const unsigned char *(*frame_for)(void *, int, int, int, int *, int *,
+		int *);
 	char url[4200], cwd[4096], html[8400];
 	void *p;
-	int w = 0, h = 0, i, repaint;
+	int w = 0, h = 0, i, repaint, flags = 0;
 	soie_node *doc, *v, **q;
 	size_t n;
 	soie_style_options so;
@@ -443,10 +445,32 @@ static void test_media(void)
 	for (i = 0; i < 100 && !(px = e->frame(p, &w, &h)); i++)
 		wait_ms(10);
 	CHECK(px && w == 160 && h == 120);
+	/* frames at the size and in the order the page shows them: those
+	 * decoded once it said so */
+	frame_for = SOIE_EXT_HOOK(e, struct soie_ext_media, frame_for);
+	CHECK(frame_for && SOIE_EXT_HOOK(e, struct soie_ext_media,
+		next_frame));
+	if (!frame_for)
+		return;
+	px = frame_for(p, 80, 60, 1, &w, &h, &flags);
+	CHECK(px && w == 160 && h == 120 && flags == SOIE_FRAME_OPAQUE);
 	e->play(p);
 	wait_ms(400);
 	e->state(p, &st);
 	CHECK(!st.paused && st.time > 0.2 && st.time < 1.5);
+	px = frame_for(p, 80, 60, 1, &w, &h, &flags);
+	CHECK(px && w == 80 && h == 60 && st.width == 160 &&
+		flags == (SOIE_FRAME_OPAQUE | SOIE_FRAME_BGRA));
+	/* the next frame of 10 a second is due within 100 ms (-1: not
+	 * decoded yet) */
+	i = SOIE_EXT_HOOK(e, struct soie_ext_media, next_frame)(p);
+	CHECK(i >= -1 && i <= 100);
+	/* and as before for a caller that knows frame() only, once the
+	 * frames made for the box (4 at most wait) are shown */
+	px = e->frame(p, &w, &h);
+	wait_ms(700);
+	px = e->frame(p, &w, &h);
+	CHECK(px && w == 160 && h == 120);
 	e->seek(p, 1.5);
 	for (i = 0; i < 300; i++) {
 		e->state(p, &st);

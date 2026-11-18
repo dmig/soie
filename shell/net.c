@@ -897,15 +897,19 @@ static int hexval(int c)
 }
 
 /* The path of a file:// URL: without its query and fragment (a local
- * page opened at #anchor is the same file), percent-decoded */
-static int fetch_file(const char *url, struct response *r)
+ * page opened at #anchor is the same file), percent-decoded. A Range
+ * header (bytes=from-to, what the media player asks, 1 MB at a time)
+ * is answered as a server would: a film is not read whole to play. */
+static int fetch_file(const char *url, const char *headers,
+	struct response *r)
 {
 	char path[4096];
 	FILE *f;
 	struct stat st;
 	char buf[16384];
 	size_t k, n = 0;
-	const char *p;
+	const char *p, *range = NULL;
+	long long from = 0, to = -1;
 
 	for (p = url + 7; *p && *p != '#' && *p != '?' &&
 	     n < sizeof(path) - 1; p++) {
@@ -923,12 +927,40 @@ static int fetch_file(const char *url, struct response *r)
 		set_error(r, strerror(errno));
 		return -1;
 	}
+	for (p = headers; p && *p && !range; p = strchr(p, '\n') ?
+	     strchr(p, '\n') + 1 : NULL)
+		if (!strncasecmp(p, "Range:", 6) &&
+		    sscanf(p + 6, " bytes=%lld-%lld", &from, &to) >= 1 &&
+		    from >= 0)
+			range = p;
 	/* regular files only: not /dev/zero, not a FIFO */
 	if (fstat(fileno(f), &st) || !S_ISREG(st.st_mode) ||
-	    (unsigned long long)st.st_size > MAX_BODY) {
+	    (!range && (unsigned long long)st.st_size > MAX_BODY)) {
 		fclose(f);
 		set_error(r, "not a readable file");
 		return -1;
+	}
+	if (range) {
+		if (to < 0 || to >= (long long)st.st_size)
+			to = (long long)st.st_size - 1;
+		if (to - from >= (long long)MAX_BODY)
+			to = from + MAX_BODY - 1;
+		if (from > to || fseeko(f, (off_t)from, SEEK_SET)) {
+			fclose(f);
+			r->status = 416;
+			return 0;
+		}
+		while (r->len < (size_t)(to - from + 1) && (k = fread(buf, 1,
+		       (size_t)(to - from + 1) - r->len < sizeof(buf) ?
+		       (size_t)(to - from + 1) - r->len : sizeof(buf), f)) > 0)
+			add(r, buf, k);
+		fclose(f);
+		snprintf(buf, sizeof(buf), "content-range: bytes %lld-%lld/%lld"
+			"\r\n", from, from + (long long)r->len - 1,
+			(long long)st.st_size);
+		r->headers = strdup(buf);
+		r->status = 206;
+		return 0;
 	}
 	while ((k = fread(buf, 1, sizeof(buf), f)) > 0 && r->len < MAX_BODY)
 		add(r, buf, k);
@@ -1677,7 +1709,7 @@ int net_fetch(const soie_request *rq, struct response *r)
 		}
 		snprintf(r->url, sizeof(r->url), "%s", url);
 		r->level = NET_LOOPBACK;
-		return fetch_file(url, r);
+		return fetch_file(url, headers, r);
 	}
 	if (!strncasecmp(url, "data:", 5)) {
 		snprintf(r->url, sizeof(r->url), "%s", url);

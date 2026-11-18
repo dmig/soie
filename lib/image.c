@@ -592,6 +592,52 @@ static void blend_px(struct canvas *c, int x, int y, const unsigned char *s,
 	p[3] = (unsigned char)(al + div255(p[3] * (255 - al)));
 }
 
+/* An opaque image in the canvas' byte order at its own size, pixel
+ * (0, 0) at canvas pixel (dx, dy): rows i0..i1 of j0..j1 are copied
+ * where no mask weighs them, what bilinear sampling at whole pixels
+ * would store one by one. */
+static void copy_rows(struct canvas *c, const struct image *im,
+	const unsigned char *px, int dx, int dy, int i0, int j0, int i1,
+	int j1)
+{
+	int i, j, k, m;
+
+	for (j = j0; j < j1; j++) {
+		const unsigned char *s = px + ((size_t)(j - dy) *
+			(size_t)im->w + (size_t)(i0 - dx)) * 4;
+		unsigned char *d = c->px + (size_t)j * (size_t)c->stride +
+			(size_t)i0 * 4;
+
+		if (!c->mask) {
+			memcpy(d, s, (size_t)(i1 - i0) * 4);
+			continue;
+		}
+		for (i = i0; i < i1; i = k) {
+			/* a run under a full mask, or a pixel on its edge */
+			for (k = i; k < i1 && mask_at(c, k, j) == 255; k++)
+				;
+			if (k > i) {
+				memcpy(d + (size_t)(i - i0) * 4,
+					s + (size_t)(i - i0) * 4,
+					(size_t)(k - i) * 4);
+				continue;
+			}
+			k = i + 1;
+			m = im->bgr ? 2 : 0;
+			if (mask_at(c, i, j)) {
+				const unsigned char *q = s + (size_t)(i - i0) * 4;
+				unsigned char o[4];
+
+				o[0] = q[m];
+				o[1] = q[1];
+				o[2] = q[2 - m];
+				o[3] = q[3];
+				blend_px(c, i, j, o, 1);
+			}
+		}
+	}
+}
+
 /* Image into the page rect (x, y, w, h), bilinear, clipped. */
 void draw_image(struct canvas *c, const struct image *im, float x, float y,
 	float w, float h, const unsigned char *current,
@@ -600,7 +646,7 @@ void draw_image(struct canvas *c, const struct image *im, float x, float y,
 	const unsigned char *px;
 	int i0, j0, i1, j1, i, j;
 
-	if (w <= 0 || h <= 0)
+	if (w <= 0 || h <= 0 || c->cover)
 		return;
 	if (im->svg) {
 		svg_render(c, im->svg, x, y, w, h, current, st, 1);
@@ -622,6 +668,13 @@ void draw_image(struct canvas *c, const struct image *im, float x, float y,
 		j1 = c->cy1;
 	if (i0 >= i1 || j0 >= j1 || !(px = image_pixels((struct image *)im)))
 		return;
+	if (im->opaque && !im->bgr == !c->bgr && c->alpha == 1 &&
+	    w == (float)im->w && h == (float)im->h &&
+	    x - c->ox == floorf(x - c->ox) && y - c->oy == floorf(y - c->oy)) {
+		copy_rows(c, im, px, (int)(x - c->ox), (int)(y - c->oy), i0, j0,
+			i1, j1);
+		return;
+	}
 	for (j = j0; j < j1; j++) {
 		float sy = ((float)j + c->oy + 0.5f - y) * (float)im->h / h - 0.5f;
 		int y0 = ifloor(sy), y1 = y0 + 1;
@@ -653,52 +706,77 @@ void draw_image(struct canvas *c, const struct image *im, float x, float y,
 				o[k] = (unsigned char)((a[k] * (1 - fx) +
 					b[k] * fx) * (1 - fy) + (cc[k] *
 					(1 - fx) + d[k] * fx) * fy + 0.5f);
+			if (im->bgr) {
+				k = o[0];
+				o[0] = o[2];
+				o[2] = (unsigned char)k;
+			}
 			blend_px(c, i, j, o, 1);
 		}
 	}
 }
 
-/* object-fit (CSS Images 3) inside the content box. */
-/* An image in a replaced box, as object-fit says, clipped to it. */
-void draw_fitted(struct canvas *c, const struct box *b,
-	const struct image *im, const unsigned char *cur)
+/* object-fit (CSS Images 3): where content of natural size iw x ih
+ * (zoomed px) goes in b's content box. */
+void fit_rect(const struct box *b, float iw, float ih, float *x, float *y,
+	float *w, float *h)
 {
 	const struct style *st = b->style;
-	float x = b->x, y = b->y, w = b->w, h = b->h, iw, ih, s;
-	int cx0 = c->cx0, cy0 = c->cy0, cx1 = c->cx1, cy1 = c->cy1;
-	int a, bb;
+	float s;
 
-	/* natural size in CSS px, zoomed */
-	iw = (float)im->w * doc_zoom();
-	ih = (float)im->h * doc_zoom();
 	if (kw(st, P_OBJECT_FIT, "contain") || kw(st, P_OBJECT_FIT, "cover") ||
-	    (kw(st, P_OBJECT_FIT, "scale-down") && (iw > w || ih > h))) {
-		s = w / iw < h / ih ? w / iw : h / ih;
+	    (kw(st, P_OBJECT_FIT, "scale-down") && (iw > b->w || ih > b->h))) {
+		s = b->w / iw < b->h / ih ? b->w / iw : b->h / ih;
 		if (kw(st, P_OBJECT_FIT, "cover"))
-			s = w / iw > h / ih ? w / iw : h / ih;
+			s = b->w / iw > b->h / ih ? b->w / iw : b->h / ih;
 		iw *= s;
 		ih *= s;
 	} else if (!kw(st, P_OBJECT_FIT, "none") &&
 		   !kw(st, P_OBJECT_FIT, "scale-down")) {
-		iw = w;		/* fill */
-		ih = h;
+		iw = b->w;	/* fill */
+		ih = b->h;
 	}
-	a = ifloor(x - c->ox);
-	bb = ifloor(y - c->oy);
+	*x = b->x + (b->w - iw) / 2;
+	*y = b->y + (b->h - ih) / 2;
+	*w = iw;
+	*h = ih;
+}
+
+/* An image at (x, y, w, h), clipped to b's content box. */
+void draw_placed(struct canvas *c, const struct box *b,
+	const struct image *im, float x, float y, float w, float h,
+	const unsigned char *cur)
+{
+	int cx0 = c->cx0, cy0 = c->cy0, cx1 = c->cx1, cy1 = c->cy1;
+	int a, bb;
+
+	a = ifloor(b->x - c->ox);
+	bb = ifloor(b->y - c->oy);
 	if (a > c->cx0)
 		c->cx0 = a;
 	if (bb > c->cy0)
 		c->cy0 = bb;
-	if (iceil(x + w - c->ox) < c->cx1)
-		c->cx1 = iceil(x + w - c->ox);
-	if (iceil(y + h - c->oy) < c->cy1)
-		c->cy1 = iceil(y + h - c->oy);
-	draw_image(c, im, x + (w - iw) / 2, y + (h - ih) / 2, iw, ih, cur,
-		st);
+	if (iceil(b->x + b->w - c->ox) < c->cx1)
+		c->cx1 = iceil(b->x + b->w - c->ox);
+	if (iceil(b->y + b->h - c->oy) < c->cy1)
+		c->cy1 = iceil(b->y + b->h - c->oy);
+	draw_image(c, im, x, y, w, h, cur, b->style);
 	c->cx0 = cx0;
 	c->cy0 = cy0;
 	c->cx1 = cx1;
 	c->cy1 = cy1;
+}
+
+/* An image in a replaced box, as object-fit says, clipped to it. */
+void draw_fitted(struct canvas *c, const struct box *b,
+	const struct image *im, const unsigned char *cur)
+{
+	float x, y, w, h;
+
+	/* natural size in CSS px, zoomed */
+	fit_rect(b, (float)im->w * doc_zoom(), (float)im->h * doc_zoom(), &x,
+		&y, &w, &h);
+	draw_placed(c, b, im, x, y, w, h, cur);
 }
 
 void paint_replaced(struct canvas *c, const struct box *b)
@@ -1819,7 +1897,7 @@ static void paint_layers(struct canvas *c, const struct box *b, int img_p,
 	int layer, nlayers = 1, i;
 	int cx0 = c->cx0, cy0 = c->cy0, cx1 = c->cx1, cy1 = c->cy1;
 
-	if (!img || !strcmp(img, "none"))
+	if (!img || !strcmp(img, "none") || c->cover)
 		return;
 	css_component_values(img, strlen(img), &li);
 	css_component_values(st->v[pos_p].u.str, strlen(st->v[pos_p].u.str),

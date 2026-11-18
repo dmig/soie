@@ -3,7 +3,9 @@
  * ALSA.
  *
  * Each player has a decoding thread (demux, decode, convert frames to
- * RGBA and sound to 16-bit stereo) and, with sound, an output thread
+ * the size and the byte order the page shows them in, RGBA at their
+ * own size until it says, and sound to 16-bit stereo) and, with sound,
+ * an output thread
  * feeding ALSA. Bytes come from the host's request function by ranges
  * of 1 MB, so a long video is never all in memory; a server without
  * ranges gives the whole file. The clock is the sound card's when
@@ -19,6 +21,12 @@
  * SOIE_AUDIO=none plays without sound (tests, machines without a
  * sound card), SOIE_AUDIO=device picks the ALSA device ("default").
  *
+ * A machine too slow for a video still plays it, in time and with its
+ * sound, showing fewer frames: see "Keeping up" below.
+ * SOIE_MEDIA_SLOW=N tests it on a fast one: every decoded video frame
+ * burns N ms more, and a player says on stderr when it closes how many
+ * frames it decoded, converted and dropped (N may be 0).
+ *
  * Copyright (C) 2026 Christophe Lincoln <pankso@slitaz.org>
  * Written with the assistance of Claude (Anthropic) and Opencode.
  *
@@ -32,6 +40,7 @@
 #include <ctype.h>
 #include <math.h>
 #include <time.h>
+#include <errno.h>
 #include <pthread.h>
 #include <alsa/asoundlib.h>
 #include <libavformat/avformat.h>
@@ -39,6 +48,7 @@
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 
 #include <soie/ext.h>
 
@@ -54,6 +64,10 @@
 #define MAX_RANGES 64
 #define GAP 150000		/* us: frames closer are one range */
 #define KEEP 3000000		/* us before the position never evicted */
+/* Keeping up */
+#define LATE_ROW 8		/* late frames in a row: is it catching up? */
+#define MAX_LEVEL 3
+#define MAX_THIN 8
 
 /* Bytes, by ranges */
 struct source {
@@ -69,8 +83,10 @@ struct source {
 };
 
 struct frame {
-	unsigned char *rgba;
+	unsigned char *rgba;	/* or BGRA: bgra */
 	int w, h;
+	int nw, nh;		/* the video's own size, fit() */
+	int bgra, opaque;
 	double pts;
 };
 
@@ -142,9 +158,12 @@ struct player {
 	double started;		/* monotonic time it started, or 0 */
 	struct frame ring[NFRAMES];
 	int head, count;
-	unsigned char *shown;	/* the frame on screen */
-	int shown_w, shown_h;
-	double shown_pts;
+	struct frame shown;	/* the frame on screen */
+	/* what the page shows frames at (frame_for()): its box in pixels
+	 * for a video of want_nw x want_nh, its canvas' order; 0: unknown */
+	int want_w, want_h, want_nw, want_nh, want_bgra;
+	int made, unshown;	/* frames converted, and never shown */
+	unsigned xruns;		/* the sound card ran dry */
 	int quarter;		/* time in quarters, for repaints */
 	int seeks, decoded, dropped;
 	double skip;		/* frames ending before are not shown */
@@ -165,6 +184,25 @@ struct player {
 	struct SwsContext *sws;
 	SwrContext *swr;
 	AVRational vtb, atb;	/* the decoders' time bases */
+	/* keeping up, the decoding thread's own too */
+	int level;		/* what the decoder skips, 0 to MAX_LEVEL */
+	int late;		/* frames in a row out of it after their time */
+	int lates;		/* late frames since level_at */
+	int behind;		/* late and not catching up: a level up */
+	double lag;		/* how late the first of the row was */
+	double level_at;	/* when the level was set, or looked at */
+	double down_at;		/* when it last went down */
+	double hold;		/* on time that long before it goes down */
+	double idle;		/* time spent waiting since level_at */
+	unsigned xruns_seen;
+	int vsent, vgot, lost;	/* packets in, frames out, skipped inside */
+	double conv_at;		/* when a frame was last converted */
+	int thin, nth;		/* one frame in thin is converted */
+	int waste;		/* half seconds in a row of frames unshown */
+	int made0, unshown0;	/* made and unshown at thin_at */
+	double thin_at, clean_at, thin_down_at, thin_hold;
+	int slow;		/* SOIE_MEDIA_SLOW, ms */
+	int converted, skipped, top_level, top_thin;	/* for its report */
 	/* fed by a script */
 	int source;
 	struct sbuf sb[MAX_BUFFERS];
@@ -306,38 +344,33 @@ static void wait_or_go(struct player *p);
 static void advance(struct player *p)
 {
 	double t;
-	struct frame *f;
-	unsigned char *swap;
-	int q, sw, sh, taken = 0;
+	struct frame *f, swap;
+	int q, taken = 0;
 
 	if (p->source)
 		wait_or_go(p);
 	t = clock_now(p);
 	while (p->count) {
 		f = &p->ring[p->head];
-		if (f->pts > t + 0.01 && p->shown)
+		if (f->pts > t + 0.01 && p->shown.rgba)
 			break;
 		/* the next one is due too: this one is late, skip it */
-		if (taken++)
+		if (taken++) {
 			p->dropped++;
+			p->unshown++;	/* the page paints fewer than come */
+		}
 		swap = p->shown;
-		sw = p->shown_w;
-		sh = p->shown_h;
-		p->shown = f->rgba;
-		p->shown_w = f->w;
-		p->shown_h = f->h;
-		p->shown_pts = f->pts;
-		f->rgba = swap;
-		f->w = sw;
-		f->h = sh;
+		p->shown = *f;
+		*f = swap;
 		p->head = (p->head + 1) % NFRAMES;
 		p->count--;
 		p->changes++;
 		pthread_cond_broadcast(&p->cond);
 	}
-	if (p->shown && (p->shown_w != p->width || p->shown_h != p->height)) {
-		p->width = p->shown_w;	/* a stream of another size */
-		p->height = p->shown_h;
+	if (p->shown.rgba && (p->shown.nw != p->width ||
+	    p->shown.nh != p->height)) {
+		p->width = p->shown.nw;	/* a stream of another size */
+		p->height = p->shown.nh;
 		p->changes++;
 	}
 	q = (int)(t * 4);
@@ -372,35 +405,248 @@ static void fit(int *w, int *h)
 		*w = *h = 0;
 }
 
+/* Whether fr's pixel format has an alpha channel */
+static int has_alpha(const AVFrame *fr)
+{
+	const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(fr->format);
+
+	return !d || (d->flags & AV_PIX_FMT_FLAG_ALPHA);
+}
+
+/*
+ * Keeping up
+ *
+ * A machine too slow to decode, convert or paint every frame must not
+ * play late: the sound goes on in time and fewer frames show.
+ * - A frame out of the decoder after its time is not converted (but
+ *   four a second, so that the picture moves).
+ * - Late frames in a row whose lag does not shrink (after a seek or a
+ *   hiccup it does: the decoder catches up), or sound that ran dry
+ *   (with sound the clock is the card's and stops with it: nothing is
+ *   late then), and the decoder skips more, a level up: 1 no loop
+ *   filter and no frames nothing refers to, 2 no B-frames, 3 key
+ *   frames only. On an H.264 High 1080p60 clip level 1 costs 40% of
+ *   level 0, level 2 27%.
+ * - A level down when no frame was late for a while and the thread
+ *   mostly waited; back up soon after, and the next try waits twice as
+ *   long (up to a minute): no flapping.
+ * - Frames converted that the page never showed (it paints fewer than
+ *   come: its own thread is slow), a quarter of them for a second and
+ *   a half: one frame in two is converted, in three... (thin), and all
+ *   again by the same patience. A busy moment of the page is not that.
+ */
+
+/* Wait for a place among the frames made; under lock. 0: quit or seek */
+static int wait_place(struct player *p)
+{
+	while (p->count == NFRAMES && !p->quit && !p->seek_req) {
+		double t0 = now(), due;
+		struct timespec ts;
+
+		if (!p->started) {
+			pthread_cond_wait(&p->cond, &p->lock);
+			p->idle += now() - t0;
+			continue;
+		}
+		/*
+		 * The page did not take the frames due (its thread is
+		 * busy): the oldest goes as soon as the one after it is
+		 * due too, as advance() would drop it. Waiting for the
+		 * page here stopped the decoding, the sound ran out a
+		 * tenth of a second later and the clock with it.
+		 */
+		due = p->ring[(p->head + 1) % NFRAMES].pts - 0.01 - clock_now(p);
+		if (due <= 0) {
+			p->head = (p->head + 1) % NFRAMES;
+			p->count--;
+			p->dropped++;
+			p->unshown++;
+			break;
+		}
+		due = t0 + (due < 0.005 ? 0.005 : due > 0.1 ? 0.1 : due);
+		ts.tv_sec = (time_t)due;
+		ts.tv_nsec = (long)((due - (double)ts.tv_sec) * 1e9);
+		pthread_cond_timedwait(&p->cond, &p->lock, &ts);
+		p->idle += now() - t0;
+	}
+	return !p->quit && !p->seek_req;
+}
+
+/* Is the frame for pts, lasting dur, worth converting? Under lock. */
+static int worth(struct player *p, double pts, double dur)
+{
+	double t = clock_now(p), w = now();
+	int made, un;
+
+	/* how many of the frames made the page showed */
+	if (w - p->thin_at >= 0.5) {
+		made = p->made - p->made0;
+		un = p->unshown - p->unshown0;
+		if (!p->thin)
+			p->thin = 1;
+		if (made >= 4 && made - un < 2) {
+			p->clean_at = w;	/* it shows nothing: busy, not slow */
+		} else if (made >= 4 && un * 4 >= made && ++p->waste < 3) {
+			p->clean_at = w;	/* a busy moment, or its start */
+		} else if (made >= 4 && un * 4 >= made) {
+			if (p->thin < MAX_THIN)
+				p->thin++;
+			p->waste = 0;
+			p->thin_hold = p->thin_hold && w - p->thin_down_at <
+				2 * p->thin_hold ? fmin(2 * p->thin_hold, 64) : 3;
+			p->clean_at = w;
+		} else if (un * 10 >= made && un) {
+			p->waste = 0;
+			p->clean_at = w;
+		} else if (p->thin > 1 && w - p->clean_at >= p->thin_hold) {
+			p->thin--;
+			p->waste = 0;
+			p->thin_down_at = p->clean_at = w;
+		} else {
+			p->waste = 0;
+		}
+		p->made0 = p->made;
+		p->unshown0 = p->unshown;
+		p->thin_at = w;
+		if (p->thin > p->top_thin)
+			p->top_thin = p->thin;
+	}
+	if (p->started && pts + dur < t) {
+		/* the one after it is due already */
+		if (!p->late)
+			p->lag = t - pts;
+		p->lates++;
+		if (++p->late >= LATE_ROW) {
+			if (t - pts >= p->lag - dur)
+				p->behind = 1;
+			p->late = 0;
+		}
+		if (w - p->conv_at < 0.25)
+			return 0;
+	} else {
+		p->late = 0;
+		if (p->thin > 1 && ++p->nth % p->thin)
+			return 0;
+	}
+	p->conv_at = w;
+	return 1;
+}
+
+/* Before a video packet goes to the decoder: what it skips */
+static void keep_up(struct player *p)
+{
+	static const enum AVDiscard frames[MAX_LEVEL + 1] = { AVDISCARD_DEFAULT,
+		AVDISCARD_NONREF, AVDISCARD_BIDIR, AVDISCARD_NONKEY };
+	/* the share of its time the thread must have waited to go down:
+	 * a level less costs more than twice as much from 1, less from
+	 * 2 and 3 */
+	static const double need[MAX_LEVEL + 1] = { 0, 0.65, 0.45, 0.45 };
+	double t = now();
+	unsigned xruns;
+	int up, lost;
+
+	pthread_mutex_lock(&p->lock);
+	xruns = p->xruns;
+	pthread_mutex_unlock(&p->lock);
+	up = p->behind || xruns != p->xruns_seen;
+	p->behind = 0;
+	p->xruns_seen = xruns;
+	if (!p->hold)
+		p->hold = 4;
+	if (up && p->level < MAX_LEVEL && t - p->level_at >= 0.5) {
+		p->hold = p->down_at && t - p->down_at < 2 * p->hold ?
+			fmin(2 * p->hold, 64) : 4;
+		p->level++;
+		p->level_at = t;
+		p->idle = 0;
+		p->lates = 0;
+		if (p->level > p->top_level)
+			p->top_level = p->level;
+	} else if (t - p->level_at >= p->hold) {
+		if (p->level && !p->lates && !up &&
+		    p->idle >= (t - p->level_at) * need[p->level]) {
+			p->level--;
+			p->down_at = t;
+			p->vsent = p->vgot = p->lost = 0;
+		}
+		p->level_at = t;
+		p->idle = 0;
+		p->lates = 0;
+	}
+	if (p->vdec->skip_frame != frames[p->level]) {
+		p->vdec->skip_frame = frames[p->level];
+		p->vdec->skip_loop_filter = p->level ? AVDISCARD_ALL :
+			AVDISCARD_DEFAULT;
+	}
+	/* the frames it skipped were dropped: scripts count them
+	 * (getVideoPlaybackQuality()) and pick a lighter stream */
+	lost = p->vsent - p->vgot - p->vdec->has_b_frames - 1;
+	if (p->level && lost > p->lost) {
+		pthread_mutex_lock(&p->lock);
+		p->decoded += lost - p->lost;
+		p->dropped += lost - p->lost;
+		pthread_mutex_unlock(&p->lock);
+		p->lost = lost;
+	}
+	p->vsent++;
+}
+
 static void push_video(struct player *p, AVFrame *fr)
 {
 	int64_t ts = fr->best_effort_timestamp;
 	double pts = ts == AV_NOPTS_VALUE ? 0 : (double)ts * av_q2d(p->vtb);
+	double dur = fr->pkt_duration > 0 ? (double)fr->pkt_duration *
+		av_q2d(p->vtb) : 0.033;
 	struct frame *f;
 	uint8_t *dst[4];
-	int linesize[4], w = fr->width, h = fr->height;
+	int linesize[4], w, h, nw = fr->width, nh = fr->height, bgra = 0;
 
+	p->vgot++;
+	if (p->slow) {
+		double end = now() + (p->slow - 1) / 1000.0;
+
+		while (now() < end)
+			;
+	}
 	/* what a seek lands past is not shown */
-	if (ts != AV_NOPTS_VALUE && fr->pkt_duration > 0 &&
-	    pts + (double)fr->pkt_duration * av_q2d(p->vtb) <= p->skip)
+	if (ts != AV_NOPTS_VALUE && fr->pkt_duration > 0 && pts + dur <= p->skip)
 		return;
-	fit(&w, &h);
-	if (!w)
-		return;
-	p->sws = sws_getCachedContext(p->sws, fr->width, fr->height,
-		fr->format, w, h, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL,
-		NULL);
-	if (!p->sws)
+	fit(&nw, &nh);
+	if (!nw)
 		return;
 	pthread_mutex_lock(&p->lock);
-	while (p->count == NFRAMES && !p->quit && !p->seek_req)
-		pthread_cond_wait(&p->cond, &p->lock);
-	if (p->quit || p->seek_req) {
+	if (!wait_place(p)) {
+		pthread_mutex_unlock(&p->lock);
+		return;
+	}
+	/* late, or more than the page shows: not converted, which costs
+	 * as much as decoding it did */
+	if (!worth(p, pts, dur > 0.1 ? 0.1 : dur)) {
+		p->decoded++;
+		p->dropped++;
+		p->skipped++;
 		pthread_mutex_unlock(&p->lock);
 		return;
 	}
 	f = &p->ring[(p->head + p->count) % NFRAMES];
+	/* the size and the byte order the page shows it in, when it said
+	 * so for a video of this size: scaled once, here, then copied */
+	w = nw;
+	h = nh;
+	if (p->want_w > 0 && p->want_nw == nw && p->want_nh == nh) {
+		w = p->want_w;
+		h = p->want_h;
+		bgra = p->want_bgra;
+		fit(&w, &h);
+	}
 	pthread_mutex_unlock(&p->lock);
+	if (!w)
+		return;
+	p->sws = sws_getCachedContext(p->sws, fr->width, fr->height,
+		fr->format, w, h, bgra ? AV_PIX_FMT_BGRA : AV_PIX_FMT_RGBA,
+		SWS_FAST_BILINEAR, NULL, NULL, NULL);
+	if (!p->sws)
+		return;
 	if (f->rgba && (f->w != w || f->h != h)) {
 		free(f->rgba);
 		f->rgba = NULL;
@@ -411,6 +657,10 @@ static void push_video(struct player *p, AVFrame *fr)
 		return;
 	f->w = w;
 	f->h = h;
+	f->nw = nw;
+	f->nh = nh;
+	f->bgra = bgra;
+	f->opaque = !has_alpha(fr);
 	dst[0] = f->rgba;
 	dst[1] = dst[2] = dst[3] = NULL;
 	linesize[0] = w * 4;
@@ -421,6 +671,8 @@ static void push_video(struct player *p, AVFrame *fr)
 	pthread_mutex_lock(&p->lock);
 	p->count++;
 	p->decoded++;
+	p->made++;
+	p->converted++;
 	pthread_mutex_unlock(&p->lock);
 }
 
@@ -440,8 +692,12 @@ static void push_audio(struct player *p, AVFrame *fr)
 		pthread_mutex_lock(&p->lock);
 		for (i = 0; i < n; ) {
 			while (p->pcm_count == PCM_FRAMES && !p->quit &&
-			       !p->seek_req)
+			       !p->seek_req) {
+				double t0 = now();
+
 				pthread_cond_wait(&p->cond, &p->lock);
+				p->idle += now() - t0;
+			}
 			if (p->quit || p->seek_req)
 				break;
 			for (; i < n && p->pcm_count < PCM_FRAMES; i++) {
@@ -591,6 +847,7 @@ static void do_seek(struct player *p, double to)
 
 	av_seek_frame(p->fmt, -1, (int64_t)(to * AV_TIME_BASE),
 		AVSEEK_FLAG_BACKWARD);
+	p->vsent = p->vgot = p->lost = p->late = 0;
 	if (p->vdec)
 		avcodec_flush_buffers(p->vdec);
 	if (p->adec)
@@ -607,7 +864,7 @@ static void do_seek(struct player *p, double to)
 	p->played = 0;
 	for (i = 0; i < NFRAMES; i++)
 		p->ring[i].pts = 0;
-	p->shown_pts = to;
+	p->shown.pts = to;
 	p->skip = to;
 	p->changes++;
 	p->seeks++;
@@ -664,6 +921,8 @@ static void *decode_thread(void *arg)
 			pthread_mutex_unlock(&p->lock);
 			continue;
 		}
+		if (pkt.stream_index == p->vs)
+			keep_up(p);
 		if (pkt.stream_index == p->vs &&
 		    avcodec_send_packet(p->vdec, &pkt) == 0)
 			drain(p, p->vdec, fr, 1);
@@ -720,6 +979,8 @@ static void *audio_thread(void *arg)
 		if (w < 0)
 			snd_pcm_recover(p->dev, (int)w, 1);
 		pthread_mutex_lock(&p->lock);
+		if (w == -EPIPE)
+			p->xruns++;	/* decoded too slowly: keep_up() */
 		if (w > 0)
 			p->played += w;
 		if (snd_pcm_delay(p->dev, &delay) < 0)
@@ -1252,6 +1513,7 @@ static void set_decoder(struct player *p, int audio, struct init *in)
 			avcodec_free_context(dec);
 	} else {
 		p->vtb = AV_TIME_BASE_Q;
+		p->vsent = p->vgot = p->lost = 0;
 	}
 }
 
@@ -1259,6 +1521,7 @@ static void source_seek(struct player *p, double to)
 {
 	int i, k;
 
+	p->vsent = p->vgot = p->lost = p->late = 0;
 	if (p->vdec)
 		avcodec_flush_buffers(p->vdec);
 	if (p->adec)
@@ -1274,7 +1537,7 @@ static void source_seek(struct player *p, double to)
 	p->started = p->playing ? now() : 0;
 	p->audio_clock = -1;
 	p->played = 0;
-	p->shown_pts = to;
+	p->shown.pts = to;
 	p->skip = to;
 	p->seek_us = (int64_t)(to * 1e6);
 	for (i = 0; i < MAX_BUFFERS; i++)
@@ -1379,6 +1642,8 @@ static void *source_thread(void *arg)
 			}
 			set_decoder(p, audio, in);
 		}
+		if (pkt && !audio && p->vdec)
+			keep_up(p);
 		if (pkt && (audio ? p->adec : p->vdec) &&
 		    avcodec_send_packet(audio ? p->adec : p->vdec, pkt) == 0)
 			drain(p, audio ? p->adec : p->vdec, fr, !audio);
@@ -1545,6 +1810,20 @@ static int can_play(void *data, const char *type)
 		!strncasecmp(type, "audio/", 6);
 }
 
+/* The lock and its condition, timed on the clock now() reads */
+static void init_lock(struct player *p)
+{
+	pthread_condattr_t a;
+	const char *slow = getenv("SOIE_MEDIA_SLOW");
+
+	pthread_mutex_init(&p->lock, NULL);
+	pthread_condattr_init(&a);
+	pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
+	pthread_cond_init(&p->cond, &a);
+	pthread_condattr_destroy(&a);
+	p->slow = slow ? atoi(slow) + 1 : 0;	/* 1: the report alone */
+}
+
 static void *open_player(void *data, const char *url,
 	soie_request_fn request, void *rdata)
 {
@@ -1567,8 +1846,7 @@ static void *open_player(void *data, const char *url,
 		free(p);
 		return NULL;
 	}
-	pthread_mutex_init(&p->lock, NULL);
-	pthread_cond_init(&p->cond, NULL);
+	init_lock(p);
 	if (pthread_create(&p->thread, NULL, decode_thread, p)) {
 		free(p->src.url);
 		free(p->pcm);
@@ -1590,6 +1868,13 @@ static void close_player(void *h)
 	pthread_cond_broadcast(&p->cond);
 	pthread_mutex_unlock(&p->lock);
 	pthread_join(p->thread, NULL);
+	if (p->slow)
+		fprintf(stderr, "media: %d frames, %d converted, %d not (late "
+			"or thinned), %d dropped in all; level %d at most, %d "
+			"now; 1 frame in %d at the thinnest, in %d now\n", p->decoded,
+			p->converted, p->skipped, p->dropped, p->top_level,
+			p->level, p->top_thin ? p->top_thin : 1,
+			p->thin ? p->thin : 1);
 	for (i = 0; i < MAX_BUFFERS; i++) {
 		struct sbuf *b = &p->sb[i];
 
@@ -1626,7 +1911,7 @@ static void close_player(void *h)
 	swr_free(&p->swr);
 	for (i = 0; i < NFRAMES; i++)
 		free(p->ring[i].rgba);
-	free(p->shown);
+	free(p->shown.rgba);
 	free(p->pcm);
 	free(p->src.buf);
 	free(p->src.url);
@@ -1742,18 +2027,52 @@ static void state(void *h, soie_media_state *st)
 	pthread_mutex_unlock(&p->lock);
 }
 
-static const unsigned char *frame(void *h, int *w, int *hh)
+static const unsigned char *frame_for(void *h, int want_w, int want_h,
+	int bgra, int *w, int *hh, int *flags)
 {
 	struct player *p = h;
 	const unsigned char *f;
 
 	pthread_mutex_lock(&p->lock);
 	advance(p);
-	f = p->shown;
-	*w = p->shown_w;
-	*hh = p->shown_h;
+	/* for the frames decoded from now on */
+	p->want_w = want_w > 0 && want_h > 0 ? want_w : 0;
+	p->want_h = want_h;
+	p->want_nw = p->width;
+	p->want_nh = p->height;
+	p->want_bgra = bgra;
+	f = p->shown.rgba;
+	*w = p->shown.w;
+	*hh = p->shown.h;
+	*flags = (p->shown.bgra ? SOIE_FRAME_BGRA : 0) |
+		(p->shown.opaque ? SOIE_FRAME_OPAQUE : 0);
 	pthread_mutex_unlock(&p->lock);
 	return f;
+}
+
+/* For an engine that knows frame() only: the video's own size, RGBA
+ * (a frame made for a box may still be on screen, never from it). */
+static const unsigned char *frame(void *h, int *w, int *hh)
+{
+	int flags;
+
+	return frame_for(h, 0, 0, 0, w, hh, &flags);
+}
+
+/* When the frame after the one on screen is due */
+static int frame_due(void *h)
+{
+	struct player *p = h;
+	double d;
+	int ms = -1;
+
+	pthread_mutex_lock(&p->lock);
+	if (p->count && p->playing && !p->waiting) {
+		d = p->ring[p->head].pts - clock_now(p);
+		ms = d <= 0 ? 0 : d > 1 ? 1000 : (int)(d * 1000 + 0.999);
+	}
+	pthread_mutex_unlock(&p->lock);
+	return ms;
 }
 
 /* Media Source Extensions hooks */
@@ -1778,8 +2097,7 @@ static void *open_source(void *data)
 	p->audio_clock = -1;
 	p->volume = 1;
 	p->opened = 1;
-	pthread_mutex_init(&p->lock, NULL);
-	pthread_cond_init(&p->cond, NULL);
+	init_lock(p);
 	if (pthread_create(&p->thread, NULL, source_thread, p)) {
 		free(p->pcm);
 		free(p);
@@ -1988,7 +2306,7 @@ static struct soie_ext_media hooks = {
 	{ SOIE_EXT_ABI, sizeof(hooks), SOIE_EXT_MEDIA, "ffmpeg", NULL },
 	can_play, open_player, close_player, play, pause_player, seek,
 	volume, state, frame, can_source, open_source, add_buffer, append,
-	buffered, source
+	buffered, source, frame_for, frame_due
 };
 
 int soie_ext_init(void)

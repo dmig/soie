@@ -590,6 +590,7 @@ static void tick_soon(SoieView *v)
 static void tick(SoieView *v)
 {
 	const char *text;
+	gint64 t0 = g_get_monotonic_time();
 	int repaint, t, x, y, w, h;
 
 	t = shell_tick(v->sh, &repaint);
@@ -607,6 +608,12 @@ static void tick(SoieView *v)
 	/* loading is told as it goes */
 	if (shell_loading(v->sh, &text) && (t < 0 || t > 500))
 		t = 500;
+	/* the wait was counted before the painting: it comes off it (a
+	 * video's next frame is due when it is, painted or not) */
+	if (t > 0) {
+		t -= (int)((g_get_monotonic_time() - t0) / 1000);
+		t = t < 0 ? 0 : t;
+	}
 	if (v->timer)
 		g_source_remove(v->timer);
 	v->timer = t >= 0 ? g_timeout_add(t, on_timer, v) : 0;

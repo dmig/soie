@@ -1188,8 +1188,11 @@ void front_icon(unsigned char *rgba, int s)
 int front_tick(void)
 {
 	const char *text;
-	int repaint, t = shell_tick(sh, &repaint);
+	struct timespec t0, t1;
+	int repaint, t;
 
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	t = shell_tick(sh, &repaint);
 	if (repaint == 2 && !(dirty & D_PAGE)) {
 		/* a scroll first, the frame painted at the new place */
 		paint_frame();
@@ -1203,6 +1206,14 @@ int front_tick(void)
 	if (shell_loading(sh, &text) && (t < 0 || t > 500))
 		t = 500;
 	front_redraw();
+	/* the wait was counted before the painting: a video frame painted
+	 * in 15 ms and the next one due in 16 would come 15 ms late */
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	if (t > 0) {
+		t -= (int)((t1.tv_sec - t0.tv_sec) * 1000 +
+			(t1.tv_nsec - t0.tv_nsec) / 1000000);
+		t = t < 0 ? 0 : t;
+	}
 	return t;
 }
 
