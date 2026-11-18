@@ -7,6 +7,8 @@ each change are in [DECISIONS.md](DECISIONS.md).
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-18
+
 ### Added
 - Extension ABI 0.2: `frame_for` and `next_frame` appended to the media
   hooks (older extensions and engines keep working).
@@ -527,6 +529,7 @@ each change are in [DECISIONS.md](DECISIONS.md).
 - Browsers: xsoie (X11), wsoie (Wayland), SoieView (GTK 3 widget).
 - soie-render, a headless renderer for tests and screenshots.
 
+[0.1.9]: https://hg.slitaz.org/soie/rev/0.1.9
 [0.1.8]: https://hg.slitaz.org/soie/rev/0.1.8
 [0.1.7]: https://hg.slitaz.org/soie/rev/0.1.7
 [0.1.6]: https://hg.slitaz.org/soie/rev/0.1.6
