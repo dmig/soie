@@ -1756,17 +1756,22 @@ static void box_of(const struct box *b, const struct cv *v, int padding,
 		*h = 0;
 }
 
-/* Along one axis: the first tile's position and how many, for an area
- * at a of size as, tiles of size *ts placed at off, painted from c0 to
- * c1. mode: 'r'epeat, 'n'o-repeat, 's'pace, rou'N'd (the size was
- * rounded by the caller). *gap is what space puts between tiles. */
+/* Along one axis: the tiles to paint and how many, for an area at a
+ * of size as, tiles of size *ts placed at off, painted from c0 to c1:
+ * *org is where tile 0 is and *k0 the number of the first one to
+ * paint, so that a tile is at the same place whatever is painted
+ * (counted from the first one painted, in floats, bands of a page
+ * did not always agree with the whole). mode: 'r'epeat, 'n'o-repeat,
+ * 's'pace, rou'N'd (the size was rounded by the caller). *gap is what
+ * space puts between tiles. */
 static int tiles(int mode, float a, float as, float ts, float off, float c0,
-	float c1, float *first, float *gap)
+	float c1, double *org, double *k0, float *gap)
 {
 	double p = (double)a + off, n, step;
 
 	*gap = 0;
-	*first = (float)p;
+	*org = p;
+	*k0 = 0;
 	if (mode == 'n' || ts <= 0)
 		return 1;
 	if (mode == 's') {
@@ -1782,8 +1787,9 @@ static int tiles(int mode, float a, float as, float ts, float off, float c0,
 	 * tile from the next, and the tiles ran over the whole distance */
 	step = (double)ts + *gap;
 	n = ceil((p - c0) / step);
+	*org = p;
+	*k0 = -n;
 	p -= n * step;
-	*first = (float)p;
 	n = ceil((c1 - p) / step);
 	if (!(n >= 1))
 		return 1;
@@ -1843,7 +1849,8 @@ static void paint_layers(struct canvas *c, const struct box *b, int img_p,
 		struct gradient g;
 		float ax = x, ay = y, aw = w, ah = h;	/* positioning area */
 		float kx = x, ky = y, kw_ = w, kh = h;	/* clip box */
-		float iw = 0, ih = 0, ox = 0, oy = 0, fx, fy, gx, gy;
+		float iw = 0, ih = 0, ox = 0, oy = 0, gx, gy;
+		double fx, fy, kx0, ky0;
 		int mx = 'r', my = 'r', nx, ny, ix, iy, grad = 0, sized = 0;
 
 		if (!nth_layer(&li, layer, &ci) || !(v = cur_peek(&ci)))
@@ -1983,14 +1990,18 @@ static void paint_layers(struct canvas *c, const struct box *b, int img_p,
 			kh = (float)(c->cy1 - c->cy0);
 		}
 		if (kw_ > 0 && kh > 0) {
-			nx = tiles(mx, ax, aw, iw, ox, kx, kx + kw_, &fx, &gx);
-			ny = tiles(my, ay, ah, ih, oy, ky, ky + kh, &fy, &gy);
+			nx = tiles(mx, ax, aw, iw, ox, kx, kx + kw_, &fx, &kx0,
+				&gx);
+			ny = tiles(my, ay, ah, ih, oy, ky, ky + kh, &fy, &ky0,
+				&gy);
 			if (grad)
 				grad_table(&g);
 			for (iy = 0; iy < ny; iy++)
 				for (ix = 0; ix < nx; ix++) {
-					float tx = fx + (float)ix * (iw + gx);
-					float ty = fy + (float)iy * (ih + gy);
+					float tx = (float)(fx + (kx0 + ix) *
+						((double)iw + gx));
+					float ty = (float)(fy + (ky0 + iy) *
+						((double)ih + gy));
 
 					if (grad)
 						gradient_draw(c, &g, tx, ty, iw, ih);
