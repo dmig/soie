@@ -1583,6 +1583,21 @@ reversed, edit the entry and say why; do not leave stale rules here.
   closes). SoieView: "download-started" (destination set there,
   synchronously as WebKit's decide-destination), SoieDownload with
   "progress", "finished", "failed" emitted from an idle.
+- Links to bytes the page holds: GitHub's download button fetches the
+  file, makes a Blob, and clicks an `<a download>` to its blob: URL;
+  the shell cannot fetch a blob: (its bytes are in the script's
+  memory), so the click did nothing (Filature bug 1062). dom.js now
+  hands an `<a download>` to a blob: or data: URL to the host with its
+  bytes (soie_script_host download, ext ABI 0.3), from the user's
+  click or a script's click(), and the host does not follow it; the
+  shell writes a download at once (dl_new(), the front asked for the
+  destination as for any other), named by the attribute, a File's
+  name, else "download" (never the URL's last part: a data: URL's is
+  base64). No gesture is asked for: a page can already start a
+  download by sending location to a file. A blob: link without
+  download still navigates (not shown: future work), and an http(s)
+  link's download attribute is not honoured (a file that is not a
+  page downloads anyway).
 - Zoom: a page zoom in the cascade, as CSS zoom on the root, not a
   scaled painting: style options' zoom multiplies absolute lengths
   (lin_resolve), the 16 px defaults, font-size and border-width
@@ -2837,6 +2852,16 @@ check it fails then):
   local origins, each leaking before. Known: a request redirected to
   another origin goes there without Origin (browsers say null) and
   its answer is checked against the page's origin.
+- A same-origin request (credentials "same-origin", the default)
+  redirected to another origin was checked as a credentialed one: the
+  other origin had to name the page's origin and allow credentials,
+  so `Access-Control-Allow-Origin: *` was refused (GitHub's raw files:
+  /raw/ redirects to raw.githubusercontent.com, Filature bug 1062).
+  Fetch's CORS check asks for that only in "include" mode: cors_ok()
+  gets the mode's credentials there. Checked on two local origins
+  (127.0.0.1 and localhost): *, the exact origin, nothing, include
+  with * (still refused), as Firefox does. Known, as before: the
+  redirected request may still carry the target's cookies.
 
 ## Speed
 

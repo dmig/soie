@@ -7,6 +7,17 @@ each change are in [DECISIONS.md](DECISIONS.md).
 
 ## [Unreleased]
 
+### Added
+- Extension ABI 0.3: `download` appended to `soie_script_host`; a 0.3
+  script extension wants a 0.3 host.
+- `<a download>` links to blob: and data: URLs are saved as downloads
+  (GitHub's download button, Filature bug 1062).
+
+### Fixed
+- fetch() and XHR of the page's origin redirected to another origin
+  that answers `Access-Control-Allow-Origin: *` were refused (GitHub
+  raw files).
+
 ## [0.1.9] - 2026-11-18
 
 ### Added

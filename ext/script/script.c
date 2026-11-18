@@ -1917,13 +1917,15 @@ static int cors_fetch(soie_request_fn fn, void *data, const soie_request *rq,
 		memset(res, 0, sizeof(*res));
 		goto out;
 	}
-	/* a redirection to another origin needs its consent too */
+	/* a redirection to another origin needs its consent too, and
+	 * same-origin credentials no longer count there: only 'include'
+	 * asks the other origin to allow them (Fetch, CORS check) */
 	if (same && origin_same(origin, res->url ? res->url : rq->url)) {
 		response_headers(res, 0, cred);
 		r = 0;
 	} else if (mode & R_NO_CORS) {
 		r = R_OPAQUE;
-	} else if (cors_ok(res, origin, cred)) {
+	} else if (cors_ok(res, origin, cred = (mode & R_INCLUDE) != 0)) {
 		response_headers(res, 1, cred);
 		r = 0;
 	} else {
@@ -2362,6 +2364,31 @@ static JSValue n_navigate(JSContext *js, JSValueConst this, int argc,
 	if (c->host->navigate)
 		c->host->navigate(c->host->data, url, mode);
 	JS_FreeCString(js, url);
+	return JS_UNDEFINED;
+}
+
+/* download(url, name, type, bytes): a link's bytes the page holds
+ * (blob:, data:) to save, as the host saves a download */
+static JSValue n_download(JSContext *js, JSValueConst this, int argc,
+	JSValueConst *argv)
+{
+	struct sctx *c = ctx_of(js);
+	const uint8_t *b;
+	const char *name, *type;
+	size_t n;
+	STR(0, url);
+
+	(void)this;
+	name = argc > 1 ? JS_ToCString(js, argv[1]) : NULL;
+	type = argc > 2 ? JS_ToCString(js, argv[2]) : NULL;
+	b = argc > 3 ? bytes_of(js, argv[3], &n) : NULL;
+	if (c->host->download)
+		c->host->download(c->host->data, url, name ? name : "",
+			type ? type : "", b ? b : (const uint8_t *)"",
+			b ? n : 0);
+	JS_FreeCString(js, url);
+	JS_FreeCString(js, name);
+	JS_FreeCString(js, type);
 	return JS_UNDEFINED;
 }
 
@@ -3299,6 +3326,7 @@ static const JSCFunctionListEntry natives[] = {
 	JS_CFUNC_DEF("importScript", 1, n_import_script),
 	JS_CFUNC_DEF("cookie", 1, n_cookie),
 	JS_CFUNC_DEF("navigate", 2, n_navigate),
+	JS_CFUNC_DEF("download", 4, n_download),
 	JS_CFUNC_DEF("showURL", 2, n_show_url),
 	JS_CFUNC_DEF("message", 2, n_message),
 	JS_CFUNC_DEF("now", 0, n_now),

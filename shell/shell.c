@@ -212,6 +212,12 @@ struct sdl {
 };
 static unsigned dl_ids;
 static struct sdl *downloads;
+static struct sdl *dl_new(struct shell *s, struct download *d,
+	const char *url, const char *headers, const char *type,
+	long long total);
+static const char *dl_write(const char *path, const void *body,
+	size_t len);
+static void dl_end(struct sdl *x, const char *err);
 static struct {
 	void (*progress)(void *data, unsigned id, long long got,
 		long long total);
@@ -677,6 +683,24 @@ static void js_navigate(void *data, const char *url, int replace)
 	/* without a click or a key of the user it is the page's own
 	 * request: guarded as such */
 	s->pending_guard = !s->in_input;
+}
+
+/* <a download> to bytes the page holds (blob:, data:): a download
+ * written at once, named by the link (else "download") */
+static void js_download(void *data, const char *url, const char *name,
+	const char *type, const void *bytes, size_t len)
+{
+	struct shell *s = data;
+	char h[600], *p;
+	struct sdl *x;
+
+	snprintf(h, sizeof(h), "filename=\"%.500s\"", *name ? name :
+		"download");
+	for (p = h + 10; p[1]; p++)
+		if (*p == '"' || *p == '\r' || *p == '\n')
+			*p = '_';
+	x = dl_new(s, NULL, url, h, type, (long long)len);
+	dl_end(x, *x->dest ? dl_write(x->dest, bytes, len) : "cancelled");
 }
 
 static void js_message(void *data, int kind, const char *text)
@@ -1621,6 +1645,20 @@ static struct sdl *dl_start(struct shell *s, struct download *d,
 	const char *url, const char *headers, const char *type,
 	long long total)
 {
+	if (s->page_dl == d)
+		s->page_dl = NULL;
+	/* the page that was there stays, its address too */
+	if (s->page.loading == L_DOC)
+		s->page.loading = L_NONE;
+	s->ui.address(s->ui_data, s->page.url);
+	return dl_new(s, d, url, headers, type, total);
+}
+
+/* A new download, its file named; the front tells where it goes */
+static struct sdl *dl_new(struct shell *s, struct download *d,
+	const char *url, const char *headers, const char *type,
+	long long total)
+{
 	struct sdl *x = calloc(1, sizeof(*x));
 	char dir[4096], name[512];
 
@@ -1636,12 +1674,6 @@ static struct sdl *dl_start(struct shell *s, struct download *d,
 	dl_free_path(dir, name, x->dest, sizeof(x->dest));
 	x->next = downloads;
 	downloads = x;
-	if (s->page_dl == d)
-		s->page_dl = NULL;
-	/* the page that was there stays, its address too */
-	if (s->page.loading == L_DOC)
-		s->page.loading = L_NONE;
-	s->ui.address(s->ui_data, s->page.url);
 	debug(1, "download %u: %s -> %s", x->id, x->url, x->dest);
 	if (s->ui.download) {
 		s->ui.download(s->ui_data, x->id, x->url, type, total, x->dest,
@@ -1711,7 +1743,6 @@ static void dl_finish(struct sdl *x, struct job *j)
 {
 	struct download *d = j->r.dl;
 	const char *err = NULL;
-	struct sdl **p;
 
 	if (!*x->dest) {
 		err = "cancelled";
@@ -1727,16 +1758,33 @@ static void dl_finish(struct sdl *x, struct job *j)
 		err = "failed";
 	} else {
 		/* in memory: chunked, compressed */
-		FILE *f = fopen(x->dest, "wb");
-
-		if (!f || fwrite(j->r.body ? j->r.body : "", 1, j->r.len, f) !=
-		    j->r.len)
-			err = strerror(errno ? errno : EIO);
-		if (f && fclose(f) && !err)
-			err = strerror(errno);
-		if (err)
-			unlink(x->dest);
+		err = dl_write(x->dest, j->r.body, j->r.len);
 	}
+	dl_end(x, err);
+}
+
+/* Bytes in memory to their file: NULL, or what went wrong */
+static const char *dl_write(const char *path, const void *body, size_t len)
+{
+	FILE *f;
+	const char *err = NULL;
+
+	errno = 0;
+	f = fopen(path, "wb");
+	if (!f || fwrite(body ? body : "", 1, len, f) != len)
+		err = strerror(errno ? errno : EIO);
+	if (f && fclose(f) && !err)
+		err = strerror(errno);
+	if (err)
+		unlink(path);
+	return err;
+}
+
+/* The download is over: the front is told, x freed */
+static void dl_end(struct sdl *x, const char *err)
+{
+	struct sdl **p;
+
 	debug(1, "download %u %s: %s", x->id, err ? err : "done", x->dest);
 	if (dl_ui.done) {
 		dl_ui.done(dl_ui.data, x->id, err);
@@ -4485,6 +4533,7 @@ struct shell *shell_new(const struct shell_ui *ui, void *data, int js)
 	s->host.data = s;
 	s->host.request = page_request;
 	s->host.navigate = js_navigate;
+	s->host.download = js_download;
 	s->host.message = js_message;
 	s->host.viewport = js_viewport;
 	s->host.scroll = js_scroll;

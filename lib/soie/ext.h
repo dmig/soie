@@ -12,11 +12,13 @@
  * - any hook may be NULL;
  * - strings returned by hooks are malloc()ed and freed by the caller.
  *
- * This is ABI 0.2: until 1.0 it may still change, extensions are
+ * This is ABI 0.3: until 1.0 it may still change, extensions are
  * built with the engine they run in. From 1.0 on, minor versions
  * only append hooks to the hook sets and add kinds. (0.2 appended
  * frame_for and next_frame to the media hooks: a 0.1 media extension
- * and a 0.2 engine, or the reverse, play together.)
+ * and a 0.2 engine, or the reverse, play together. 0.3 appended
+ * download to soie_script_host, which the host fills: a 0.3 script
+ * extension wants a 0.3 host.)
  *
  * A module for soie_ext_load() exports "int soie_ext_init(void)",
  * which registers its hook sets with soie_ext_register() and returns
@@ -34,7 +36,7 @@
 #include "dom.h"
 
 #define SOIE_EXT_ABI_MAJOR 0
-#define SOIE_EXT_ABI_MINOR 2
+#define SOIE_EXT_ABI_MINOR 3
 #define SOIE_EXT_ABI (SOIE_EXT_ABI_MAJOR << 16 | SOIE_EXT_ABI_MINOR)
 
 typedef enum {
@@ -228,6 +230,13 @@ typedef struct {
 	 * SOIE_REQ_NO_LOOPBACK, the guard of its requests (SOIE_REQ_PAGE:
 	 * all three go with every request of the page and its workers) */
 	int flags;
+	/* Since ABI 0.3. Bytes the page holds to save as a download: an
+	 * <a download> link to a blob: or data: URL was followed, by the
+	 * user or by a script. name is the download attribute's value or
+	 * the File's name ("" for none), type the bytes' MIME type (""
+	 * when unknown). The host copies what it keeps. May be NULL. */
+	void (*download)(void *data, const char *url, const char *name,
+		const char *type, const void *bytes, size_t len);
 } soie_script_host;
 
 #define SOIE_MOD_SHIFT 1

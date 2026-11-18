@@ -691,13 +691,33 @@ api.dispatch = function (target, type, init) {
 	if (type === 'blur' && t === activeElement)
 		activeElement = null;
 	const ok = dispatch(t, ev);
-	if (ok && type === 'click' && t instanceof Element)
-		activation(t, true);
+	/* a link saved here: the host does not follow it */
+	if (ok && type === 'click' && t instanceof Element &&
+	    activation(t, true))
+		return true;
 	return !ok;
 };
 
+/* <a download> to bytes the page holds (blob:, data:): the host cannot
+ * fetch them, they go to it here; true when saved */
+function saveLink(a) {
+	const name = a.getAttribute('download');
+	const url = a.href;
+
+	if (name === null || !/^(blob|data):/i.test(url))
+		return false;
+	const b = localURL(url);
+	if (!b)
+		return false;
+	const f = /^blob:/i.test(url) && objectURLs.get(url.replace(/#.*/, ''));
+	api.download(url, name || (f instanceof File ? f.name : ''),
+		b.type, b.body);
+	return true;
+}
+
 /* Default actions the host does not know: scripts' own, after a
- * click on these elements. host: the host does the navigation. */
+ * click on these elements. host: the host does the navigation. True
+ * when the link was saved here (the host does not follow it). */
 function activation(el, host) {
 	/* the event's way: a link or a button around a slot that shows
 	 * el, or around the host of el's shadow tree */
@@ -724,6 +744,8 @@ function activation(el, host) {
 				} catch (e) {
 					report(e);
 				}
+			else if (saveLink(n))
+				return true;
 			else if (!host)
 				api.navigate(n.href, newWindow(n.target) ?
 					2 : false);
