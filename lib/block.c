@@ -2009,8 +2009,8 @@ static float stick_axis(const struct style *st, int before, int after,
 }
 
 /* Moves a box to its new offset, what it covered and covers to paint */
-static int stick_move(soie_node *doc, struct box *b, float dx, float dy,
-	int damage)
+static int stick_move(soie_node *doc, struct layout *l, struct box *b,
+	float dx, float dy, int damage)
 {
 	float r[4];
 
@@ -2023,6 +2023,8 @@ static int stick_move(soie_node *doc, struct box *b, float dx, float dy,
 	translate(b, dx - b->stx, dy - b->sty);
 	b->stx = dx;
 	b->sty = dy;
+	if (l->inked)
+		ink_bounds(b);	/* the rows it paints moved with it */
 	if (damage) {
 		stick_extent(b, r, 0);
 		damage_rect(doc, r);
@@ -2051,29 +2053,39 @@ static int stick_box(soie_node *doc, struct layout *l, struct box *b,
 			b->m[0], b->m[2], cb->y, cb->y + cb->h,
 			doc->u.doc->scroll_y, l->height);
 	}
-	return stick_move(doc, b, dx, dy, damage);
+	return stick_move(doc, l, b, dx, dy, damage);
 }
 
-/* Parents first: a sticky box inside another moves with it. A fixed
- * box is laid out in the view at the top of the page and follows the
- * scroll position, less what its ancestors moved (ax, ay), unless a
- * transformed ancestor holds it. flags: 1 below a box that clips, 2
- * below a transformed one. */
-static int stick_walk(soie_node *doc, struct layout *l, struct box *b,
-	int flags, float ax, float ay, int damage, int depth)
+/* The boxes to move, parents first: a sticky box inside another moves
+ * with it. up: the nearest one listed above. flags: 1 below a box that
+ * clips, 2 below a transformed one (it holds its fixed boxes). */
+static void stick_list(struct layout *l, struct box *b, int flags, int up,
+	int depth)
 {
 	struct box *c;
 	const soie_node *n = b->node;
 	float tm[6];
-	int moved = 0;
 
 	if (b->style && b->type != B_INLINE && b->type != B_TEXT) {
-		if (kw(b->style, P_POSITION, "sticky"))
-			moved = stick_box(doc, l, b, flags & 1, damage);
-		else if (kw(b->style, P_POSITION, "fixed") && !(flags & 2))
-			moved = stick_move(doc, b,
-				doc->u.doc->scroll_x - ax,
-				doc->u.doc->scroll_y - ay, damage);
+		int sticky = kw(b->style, P_POSITION, "sticky");
+
+		if (sticky || (kw(b->style, P_POSITION, "fixed") &&
+		    !(flags & 2))) {
+			struct stick *s;
+
+			if (l->nsticks == l->capsticks) {
+				l->capsticks = l->capsticks ? l->capsticks * 2 : 8;
+				l->sticks = xrealloc(l->sticks,
+					(size_t)l->capsticks * sizeof(*l->sticks));
+			}
+			s = &l->sticks[l->nsticks];
+			s->b = b;
+			s->up = up;
+			s->fixed = !sticky;
+			s->clipped = flags & 1;
+			s->ax = s->ay = 0;
+			up = l->nsticks++;
+		}
 		if (!(b->flags & BF_ANON) && box_transform(b, tm))
 			flags |= 2;
 	}
@@ -2086,32 +2098,54 @@ static int stick_walk(soie_node *doc, struct layout *l, struct box *b,
 		flags |= 1;
 	if (depth < 512)
 		for (c = b->first; c; c = c->next)
-			moved |= stick_walk(doc, l, c, flags, ax + b->stx,
-				ay + b->sty, damage, depth + 1);
-	return moved;
+			stick_list(l, c, flags, up, depth + 1);
 }
 
+/* A fixed box is laid out in the view at the top of the page and
+ * follows the scroll position, less what its ancestors moved (ax, ay:
+ * only the listed ones move). The list is made once for a tree: its
+ * boxes and their styles stay until the next layout. */
 void stick_apply(soie_node *doc, struct layout *l, int damage)
 {
-	if (l->root)
-		l->sticky = stick_walk(doc, l, l->root, 0, 0, 0, damage, 0);
-}
+	int i, moved = 0;
 
-static void stick_back(struct box *b, int depth)
-{
-	struct box *c;
-
-	if (b->stx || b->sty) {
-		translate(b, -b->stx, -b->sty);
-		b->stx = b->sty = 0;
+	if (!l->root)
+		return;
+	if (!l->listed) {
+		stick_list(l, l->root, 0, -1, 0);
+		l->listed = 1;
 	}
-	if (depth < 512)
-		for (c = b->first; c; c = c->next)
-			stick_back(c, depth + 1);
+	for (i = 0; i < l->nsticks; i++) {
+		struct stick *s = &l->sticks[i];
+
+		s->ax = s->ay = 0;
+		if (s->up >= 0) {
+			s->ax = l->sticks[s->up].ax + l->sticks[s->up].b->stx;
+			s->ay = l->sticks[s->up].ay + l->sticks[s->up].b->sty;
+		}
+		if (s->fixed)
+			moved |= stick_move(doc, l, s->b,
+				doc->u.doc->scroll_x - s->ax,
+				doc->u.doc->scroll_y - s->ay, damage);
+		else
+			moved |= stick_box(doc, l, s->b, s->clipped, damage);
+	}
+	l->sticky = moved;
 }
 
+/* Back where the flow left them, in the order they were moved */
 void stick_undo(struct layout *l)
 {
-	if (l->sticky && l->root)
-		stick_back(l->root, 0);
+	int i;
+
+	if (!l->sticky)
+		return;
+	for (i = 0; i < l->nsticks; i++) {
+		struct box *b = l->sticks[i].b;
+
+		if (b->stx || b->sty) {
+			translate(b, -b->stx, -b->sty);
+			b->stx = b->sty = 0;
+		}
+	}
 }

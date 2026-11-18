@@ -1316,6 +1316,7 @@ char *layout_dump(const struct box *root, size_t *len)
 void layout_free(struct layout *l)
 {
 	box_free(l->root);
+	free(l->sticks);
 	free(l);
 }
 

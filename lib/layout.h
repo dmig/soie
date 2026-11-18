@@ -119,6 +119,19 @@ struct box {
 	 * height, flex stretches after) */
 	struct box **absv;
 	int nabsv;
+	/* the rows its subtree may paint, for a paint to leave it when
+	 * they are out of the canvas: ink_bounds() (paint.c) */
+	float iy0, iy1;
+};
+
+/* A box that position: sticky or fixed moves with the scroll offset:
+ * its nearest such ancestor (index, -1 none) and what the ancestors
+ * moved (ax, ay), below a box that clips or not */
+struct stick {
+	struct box *b;
+	int up;
+	unsigned char fixed, clipped;
+	float ax, ay;
 };
 
 struct layout {
@@ -131,6 +144,11 @@ struct layout {
 	int counters;		/* it has CSS counters: no box is kept from
 				 * it, a number may depend on any element */
 	int sticky;		/* boxes moved by position: sticky */
+	/* those that may be, parents first, listed by the first
+	 * stick_apply(): a scroll does not walk the tree */
+	struct stick *sticks;
+	int nsticks, capsticks, listed;
+	int inked;		/* the boxes' iy0, iy1 are those of this tree */
 };
 
 /* damage.c: around a layout, the focus moved, the document freed */
@@ -159,6 +177,8 @@ float doc_zoom(void);
 /* How far a box's outer shadows reach out of its border box (paint.c),
  * at most: damage takes it with the box */
 float shadow_reach(const struct style *st);
+/* b's iy0, iy1 and those of the boxes below, from where they are now */
+void ink_bounds(struct box *b);
 
 /* block.c */
 struct bfc;

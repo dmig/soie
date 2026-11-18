@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include "font.h"
@@ -159,7 +160,8 @@ static void blend(struct canvas *c, int x, int y, const unsigned char *rgba,
 	if (x < c->cx0 || y < c->cy0 || x >= c->cx1 || y >= c->cy1)
 		return;
 	a = div255(rgba[3] * cov);
-	a = (int)((float)a * c->alpha + 0.5f);
+	if (c->alpha != 1)	/* 1: the same a, without the conversions */
+		a = (int)((float)a * c->alpha + 0.5f);
 	if (c->mask)
 		a = div255(a * mask_at(c, x, y));
 	if (a <= 0)
@@ -1228,6 +1230,12 @@ static void box_pass(unsigned char *p, int n, int step, int lo, int hi,
 	unsigned char *t)
 {
 	int i, sum = 0, w = lo + hi + 1;
+	/* (sum + w / 2) / w for every value: a division each was the
+	 * cost of a blur on old processors. Times 2^32 / w rounded up,
+	 * then the high word: the same quotient while the sum times w is
+	 * below 2^32 (it is at most 255 w + w / 2, w a few hundred; past
+	 * that, divided) */
+	unsigned rec = w < 2 || w > 4000 ? 0 : 0xffffffffu / (unsigned)w + 1;
 
 	for (i = 0; i < n; i++)
 		t[i] = p[(size_t)i * (size_t)step];
@@ -1240,8 +1248,9 @@ static void box_pass(unsigned char *p, int n, int step, int lo, int hi,
 	for (i = 0; i < n; i++) {
 		int a = i - lo, z = i + hi + 1;
 
-		p[(size_t)i * (size_t)step] = (unsigned char)((sum + w / 2) /
-			w);
+		p[(size_t)i * (size_t)step] = (unsigned char)(rec ?
+			((uint64_t)(unsigned)(sum + w / 2) * rec) >> 32 :
+			(unsigned)(sum + w / 2) / (unsigned)w);
 		sum += t[z >= n ? n - 1 : z] - t[a < 0 ? 0 : a];
 	}
 }
@@ -1265,66 +1274,224 @@ static void blur_line(unsigned char *p, int n, int step, int d,
 }
 
 /*
- * One shadow of a box whose border box is x, y, w, h (radii r) and
- * padding box px, py, pw, ph (radii pr). An outer shadow is the border
- * box moved and spread, blurred, painted out of the border box only;
- * an inset one is the padding box less the moved and shrunk hole,
- * blurred, painted in the padding box. The blur (a Gaussian of
- * deviation blur / 2) runs over a buffer of what the clip shows, with
- * the margin it reads from.
+ * The blurred shape of a shadow is kept: a scroll step paints a band of
+ * each shadow in view, and blurred it again every time (73% of a step
+ * on the SliTaz home page). Kept as browsers do, in nine parts: away
+ * from its corners and from what the blur reads of them, the shape is
+ * the same along a side and flat inside, so the columns and the rows of
+ * the middle are stored once. A tile is then as large as the corners
+ * and the blur, whatever the box.
+ *
+ * One axis of a shape from a to b, n pixels once cut: pixel e0 is the
+ * first kept (m before the shape), those from split on stand for cut
+ * more, all alike.
  */
-static void paint_shadow(struct canvas *c, const struct shadow *s,
-	float x, float y, float w, float h, const float *r, float px,
-	float py, float pw, float ph, const float *pr)
+struct shaxis {
+	int e0, split, cut, n;
+};
+
+/* r0, r1: the radii of the two corners at a, r2, r3: at b; the blur
+ * reads reach pixels each way and m are kept around the shape */
+static void shadow_axis(float a, float b, float r0, float r1, float r2,
+	float r3, int m, int reach, struct shaxis *x)
 {
-	float sx, sy, sw, sh, sr[8];
-	int d = ifloor(s->blur / 2 * 1.87997f + 0.5f);
-	int m = d < 2 ? 0 : (d * 3 + 1) / 2 + 1;
-	int i, j, i0, j0, i1, j1, b0, c0, b1, c1, bw, bh;
+	/* the pixels between the corners: rrect_cov() gives them all the
+	 * same there, one in from each end for the rounding of the sums */
+	int ma = iceil(fmaxf(a + r0, a + r1)) + 1;
+	int mb = ifloor(fminf(b - r2, b - r3)) - 1;
+
+	x->e0 = ifloor(a) - m;
+	x->n = iceil(b) + m - x->e0;
+	/* one of them has only such pixels in what the blur reads: kept,
+	 * with reach of them on each side for the others to read */
+	x->cut = mb - ma - (2 * reach + 1);
+	if (x->cut < 0)
+		x->cut = 0;
+	x->split = ma + reach - x->e0;
+	x->n -= x->cut;
+}
+
+/* The kept pixel that page pixel p is (out of 0..n: out of the tile) */
+static int shadow_at(const struct shaxis *x, int p)
+{
+	int u = p - x->e0;
+
+	if (u > x->split) {
+		u -= x->cut;
+		if (u < x->split)
+			u = x->split;
+	}
+	return u;
+}
+
+/* What makes a tile: the shape, the blur's box width, inset */
+struct shkey {
+	float x, y, w, h, r[8];
+	int d, inset;
+};
+
+struct shtile {
+	struct shkey k;
+	int w, h;
+	unsigned used;
+	unsigned char *a;	/* NULL: free */
+};
+
+/* 32 tiles, 2 MB together at most, the least recently painted dropped
+ * (a 24px blur is 22 KB, a 48px one 90 KB); one of more than 1 MB (a
+ * blur over 170px) is not kept: blurred at each paint, as before */
+#define NSHTILES 32
+#define SHTILE_MAX ((size_t)1 << 20)
+#define SHTILES_MAX ((size_t)2 << 20)
+static struct shtile shtiles[NSHTILES];
+static size_t shtiles_size;
+static unsigned shtick;
+
+static int shadow_margin(int d)
+{
+	return d < 2 ? 0 : (d * 3 + 1) / 2 + 1;
+}
+
+/* How far the three box blurs of width d read */
+static int shadow_reach_px(int d)
+{
+	return d < 2 ? 0 : 3 * (d / 2);
+}
+
+/* The tile of key k: the coverage of its shape over the kept pixels,
+ * blurred. What is cut is like its neighbours, so the blur of the rest
+ * is what the blur of the whole gives there. */
+static void shadow_tile_fill(struct shtile *t)
+{
+	const struct shkey *k = &t->k;
+	int m = shadow_margin(k->d), reach = shadow_reach_px(k->d), i, j;
+	struct shaxis ax, ay;
+	unsigned char *tmp;
+
+	shadow_axis(k->x, k->x + k->w, k->r[0], k->r[3], k->r[1], k->r[2], m,
+		reach, &ax);
+	shadow_axis(k->y, k->y + k->h, k->r[4], k->r[5], k->r[6], k->r[7], m,
+		reach, &ay);
+	t->w = ax.n;
+	t->h = ay.n;
+	t->a = xmalloc((size_t)t->w * (size_t)t->h);
+	tmp = xmalloc((size_t)(t->w > t->h ? t->w : t->h));
+	for (j = 0; j < t->h; j++)
+		for (i = 0; i < t->w; i++) {
+			int px = ax.e0 + i + (i > ax.split ? ax.cut : 0);
+			int py = ay.e0 + j + (j > ay.split ? ay.cut : 0);
+			int a = rrect_cov((float)px, (float)py, k->x, k->y,
+				k->x + k->w, k->y + k->h, k->r);
+
+			t->a[(size_t)j * (size_t)t->w + (size_t)i] =
+				(unsigned char)(k->inset ? 255 - a : a);
+		}
+	for (j = 0; j < t->h; j++)
+		blur_line(t->a + (size_t)j * (size_t)t->w, t->w, 1, k->d, tmp);
+	for (i = 0; i < t->w; i++)
+		blur_line(t->a + i, t->h, t->w, k->d, tmp);
+	free(tmp);
+}
+
+static void shadow_tile_drop(struct shtile *t)
+{
+	if (t->a)
+		shtiles_size -= (size_t)t->w * (size_t)t->h;
+	free(t->a);
+	t->a = NULL;
+}
+
+/* Is v a multiple of 1/16 small enough for sums of such values to be
+ * exact */
+static int sixteenth(float v)
+{
+	return v > -250000 && v < 250000 && v * 16 == floorf(v * 16);
+}
+
+/*
+ * The tile of the shape sx, sy, sw, sh (radii sr) blurred by d, and
+ * where its pixels are (ax, ay); NULL when it is not kept. A shape on
+ * sixteenths of a pixel (all of them but under a zoom) gives the same
+ * coverage wherever it is and however long its sides are, the sums of
+ * rrect_cov() being exact: its tile is that of the shape at the origin
+ * with its middle cut, shared by all the boxes with these corners and
+ * this blur. Another is kept for itself, where it is.
+ */
+static const struct shtile *shadow_tile(int inset, float sx, float sy,
+	float sw, float sh, const float *sr, int d, struct shaxis *ax,
+	struct shaxis *ay)
+{
+	int m = shadow_margin(d), reach = shadow_reach_px(d), i, j, old = 0;
+	struct shkey k;
+	struct shtile *t;
+
+	if (!(sx > -1e6f && sx < 1e6f && sy > -1e6f && sy < 1e6f &&
+	    sw < 1e6f && sh < 1e6f))
+		return NULL;
+	shadow_axis(sx, sx + sw, sr[0], sr[3], sr[1], sr[2], m, reach, ax);
+	shadow_axis(sy, sy + sh, sr[4], sr[5], sr[6], sr[7], m, reach, ay);
+	if ((size_t)ax->n * (size_t)ay->n > SHTILE_MAX)
+		return NULL;
+	memset(&k, 0, sizeof(k));
+	k.x = sx;
+	k.y = sy;
+	k.w = sw;
+	k.h = sh;
+	memcpy(k.r, sr, sizeof(k.r));
+	k.d = d;
+	k.inset = inset;
+	for (i = 0; i < 8 && sixteenth(sr[i]); i++)
+		;
+	if (i == 8 && sixteenth(sx) && sixteenth(sy) && sixteenth(sw) &&
+	    sixteenth(sh)) {
+		k.x = sx - floorf(sx);
+		k.y = sy - floorf(sy);
+		k.w = sw - (float)ax->cut;
+		k.h = sh - (float)ay->cut;
+	}
+	for (i = 0; i < NSHTILES; i++) {
+		t = &shtiles[i];
+		if (t->a && !memcmp(&t->k, &k, sizeof(k)))
+			break;
+		if (!t->a || (shtiles[old].a && t->used < shtiles[old].used))
+			old = i;
+	}
+	if (i == NSHTILES) {
+		size_t size = (size_t)ax->n * (size_t)ay->n;
+
+		/* in a free slot, or the oldest tile's; then the oldest ones
+		 * go while they are too many bytes together */
+		for (i = old; i >= 0 && (i == old || shtiles_size + size >
+		    SHTILES_MAX); ) {
+			shadow_tile_drop(&shtiles[i]);
+			for (i = -1, j = 0; j < NSHTILES; j++)
+				if (shtiles[j].a && (i < 0 || shtiles[j].used <
+				    shtiles[i].used))
+					i = j;
+		}
+		t = &shtiles[old];
+		t->k = k;
+		shadow_tile_fill(t);
+		shtiles_size += (size_t)t->w * (size_t)t->h;
+	}
+	t->used = ++shtick;
+	/* the tile is the key's, cut on its own: the same pixels kept */
+	return t->w == ax->n && t->h == ay->n ? t : NULL;
+}
+
+/* The shadow blurred for this paint alone: the blur runs over a buffer
+ * of what the clip shows (i0, j0 to i1, j1), with the margin it reads
+ * from */
+static void shadow_blurred(struct canvas *c, const struct shadow *s,
+	float x, float y, float w, float h, const float *r, float px,
+	float py, float pw, float ph, const float *pr, float sx, float sy,
+	float sw, float sh, const float *sr, int d, int i0, int j0, int i1,
+	int j1)
+{
+	int m = shadow_margin(d);
+	int i, j, b0, c0, b1, c1, bw, bh;
 	unsigned char *buf, *t;
 
-	if (s->inset) {
-		sx = px + s->x + s->spread;
-		sy = py + s->y + s->spread;
-		sw = pw - 2 * s->spread;
-		sh = ph - 2 * s->spread;
-		for (i = 0; i < 8; i++)
-			sr[i] = spread_r(pr[i], -s->spread);
-		/* painted: the padding box */
-		i0 = ifloor(px - c->ox);
-		j0 = ifloor(py - c->oy);
-		i1 = iceil(px + pw - c->ox);
-		j1 = iceil(py + ph - c->oy);
-	} else {
-		sx = x + s->x - s->spread;
-		sy = y + s->y - s->spread;
-		sw = w + 2 * s->spread;
-		sh = h + 2 * s->spread;
-		if (sw <= 0 || sh <= 0)
-			return;
-		for (i = 0; i < 8; i++)
-			sr[i] = spread_r(r[i], s->spread);
-		/* painted: the shape and its blur */
-		i0 = ifloor(sx - c->ox) - m;
-		j0 = ifloor(sy - c->oy) - m;
-		i1 = iceil(sx + sw - c->ox) + m;
-		j1 = iceil(sy + sh - c->oy) + m;
-	}
-	if (sw < 0)
-		sw = 0;
-	if (sh < 0)
-		sh = 0;
-	fit_radii(sr, sw, sh);
-	if (i0 < c->cx0)
-		i0 = c->cx0;
-	if (j0 < c->cy0)
-		j0 = c->cy0;
-	if (i1 > c->cx1)
-		i1 = c->cx1;
-	if (j1 > c->cy1)
-		j1 = c->cy1;
-	if (i0 >= i1 || j0 >= j1 || !s->rgba[3])
-		return;
 	/* the buffer: what is painted and the margin the blur reads */
 	b0 = i0 - m;
 	c0 = j0 - m;
@@ -1368,6 +1535,130 @@ static void paint_shadow(struct canvas *c, const struct shadow *s,
 		}
 	free(t);
 	free(buf);
+}
+
+/*
+ * One shadow of a box whose border box is x, y, w, h (radii r) and
+ * padding box px, py, pw, ph (radii pr). An outer shadow is the border
+ * box moved and spread, blurred, painted out of the border box only;
+ * an inset one is the padding box less the moved and shrunk hole,
+ * blurred, painted in the padding box. The blur is a Gaussian of
+ * deviation blur / 2; its shape comes from a tile (shadow_tile()), or
+ * is blurred here when there is none: the same pixels.
+ */
+static void paint_shadow(struct canvas *c, const struct shadow *s,
+	float x, float y, float w, float h, const float *r, float px,
+	float py, float pw, float ph, const float *pr)
+{
+	float sx, sy, sw, sh, sr[8];
+	int d = ifloor(s->blur / 2 * 1.87997f + 0.5f);
+	int m = shadow_margin(d);
+	int i, j, i0, j0, i1, j1, f0, f1, ox, oy;
+	const struct shtile *t = NULL;
+	struct shaxis ax, ay;
+
+	if (s->inset) {
+		sx = px + s->x + s->spread;
+		sy = py + s->y + s->spread;
+		sw = pw - 2 * s->spread;
+		sh = ph - 2 * s->spread;
+		for (i = 0; i < 8; i++)
+			sr[i] = spread_r(pr[i], -s->spread);
+		/* painted: the padding box */
+		i0 = ifloor(px - c->ox);
+		j0 = ifloor(py - c->oy);
+		i1 = iceil(px + pw - c->ox);
+		j1 = iceil(py + ph - c->oy);
+	} else {
+		sx = x + s->x - s->spread;
+		sy = y + s->y - s->spread;
+		sw = w + 2 * s->spread;
+		sh = h + 2 * s->spread;
+		if (sw <= 0 || sh <= 0)
+			return;
+		for (i = 0; i < 8; i++)
+			sr[i] = spread_r(r[i], s->spread);
+		/* painted: the shape and its blur */
+		i0 = ifloor(sx - c->ox) - m;
+		j0 = ifloor(sy - c->oy) - m;
+		i1 = iceil(sx + sw - c->ox) + m;
+		j1 = iceil(sy + sh - c->oy) + m;
+	}
+	if (sw < 0)
+		sw = 0;
+	if (sh < 0)
+		sh = 0;
+	fit_radii(sr, sw, sh);
+	if (i0 < c->cx0)
+		i0 = c->cx0;
+	if (j0 < c->cy0)
+		j0 = c->cy0;
+	if (i1 > c->cx1)
+		i1 = c->cx1;
+	if (j1 > c->cy1)
+		j1 = c->cy1;
+	if (i0 >= i1 || j0 >= j1 || !s->rgba[3])
+		return;
+	/* a tile's pixels are the page's: a canvas on whole pixels (they
+	 * all are), a shape that is not empty */
+	if (sw > 0 && sh > 0 && c->ox == floorf(c->ox) && c->oy ==
+	    floorf(c->oy) && fabsf(c->ox) < 1e6f && fabsf(c->oy) < 1e6f)
+		t = shadow_tile(s->inset, sx, sy, sw, sh, sr, d, &ax, &ay);
+	if (!t) {
+		shadow_blurred(c, s, x, y, w, h, r, px, py, pw, ph, pr, sx, sy,
+			sw, sh, sr, d, i0, j0, i1, j1);
+		return;
+	}
+	ox = (int)c->ox;
+	oy = (int)c->oy;
+	/* the pixels f0 to f1 are whole in the border box across: on the
+	 * rows away from its corners they show nothing of an outer shadow,
+	 * and are most of a band under a large box */
+	f0 = iceil(x - c->ox);
+	f1 = ifloor(x + w - c->ox);
+	while (f0 < f1 && (float)f0 + c->ox < x)
+		f0++;
+	while (f0 < f1 && (float)(f1 - 1) + c->ox + 1 > x + w)
+		f1--;
+	for (j = j0; j < j1; j++) {
+		int v = shadow_at(&ay, j + oy), away, in;
+		const unsigned char *row = v < 0 || v >= t->h ? NULL : t->a +
+			(size_t)v * (size_t)t->w;
+		float qy = (float)j + c->oy;
+
+		if (!row && !s->inset)
+			continue;	/* out of the tile: no shadow */
+		/* the border box: not on this row (nor at a pixel beside
+		 * it, below), or all of f0 to f1: what rrect_cov() answers
+		 * without sampling */
+		away = qy + 1 <= y || qy >= y + h;
+		in = !s->inset && f0 < f1 && qy >= y && qy + 1 <= y + h &&
+			qy >= y + r[4] && qy >= y + r[5] &&
+			qy + 1 <= y + h - r[6] && qy + 1 <= y + h - r[7];
+		for (i = i0; i < i1; i++) {
+			float qx = (float)i + c->ox;
+			int u, a;
+
+			if (in && i >= f0 && i < f1) {
+				i = f1 - 1;
+				continue;
+			}
+			u = shadow_at(&ax, i + ox);
+			/* out of the tile: no shadow, or all of an inset one */
+			a = !row || u < 0 || u >= t->w ? (s->inset ? 255 : 0) :
+				row[u];
+			if (!a)
+				continue;
+			if (s->inset)
+				a = a * rrect_cov(qx, qy, px, py, px + pw,
+					py + ph, pr) / 255;
+			else if (!away && !(qx + 1 <= x || qx >= x + w))
+				a = a * (255 - rrect_cov(qx, qy, x, y, x + w,
+					y + h, r)) / 255;
+			if (a > 0)
+				blend(c, i, j, s->rgba, a);
+		}
+	}
 }
 
 /* A box's outer shadows, background, inset shadows and borders */
@@ -1605,9 +1896,16 @@ static void paint_lines(struct canvas *c, struct box *b)
 				paint_box(c, f->box, 1);
 			}
 		}
-		if (after > -1e30f)
-			draw_text(c, b->style, "\xe2\x80\xa6", 3, after,
-				l->baseline, 0);
+		/* out of the clip by the rule of the text above: culling
+		 * counts on it */
+		if (after > -1e30f) {
+			float em = b->style->v[P_FONT_SIZE].u.len.px;
+
+			if (!(l->baseline + em < c->oy + (float)c->cy0 ||
+			    l->baseline - 2 * em > c->oy + (float)c->cy1))
+				draw_text(c, b->style, "\xe2\x80\xa6", 3, after,
+					l->baseline, 0);
+		}
 	}
 }
 
@@ -1810,6 +2108,153 @@ static int transformed(const struct box *b)
 
 	return b->style && b->parent && b->type != B_TEXT &&
 		box_transform(b, m) == 2;
+}
+
+static int zindex(const struct box *b)
+{
+	return b->style->v[P_Z_INDEX].kw ? 0 :
+		(int)b->style->v[P_Z_INDEX].u.num;
+}
+
+/*
+ * Culling: a paint of a band walked the whole tree, every box set up
+ * to find it was out of the clip (1.5 ms a band on a page of 24000
+ * boxes). Each box keeps the rows its subtree may paint (iy0 to iy1,
+ * page coordinates: scrolls are vertical, bands as wide as the view),
+ * and one that does not meet the canvas is left with all it holds, its
+ * floats and its layers too: they are below it in the tree, wherever
+ * they are painted from. The canvas, not the clip: a layer is painted
+ * later, out of the clip its ancestors had when the walk met it.
+ *
+ * This must leave every pixel as it was, so the rows are those of the
+ * painting code itself: a box's border box, the pixel it is snapped
+ * to, its outer shadows and its outline; an inline box's fragments
+ * alike; a text's from 2em over its baseline to 1em under, as
+ * paint_lines() skips it. What paints by other rules, or does more
+ * than paint, is everywhere (never left): replaced content (controls
+ * and SVG are not clipped to their box, a player has its state, an
+ * image may ask for its bytes again), a transform, an image as
+ * background or mask (asked for when painted), a layer with a negative
+ * z-index (a context that has one paints its own background first,
+ * not as one without: paint_context_in() must find them all). So is
+ * what holds a sticky or fixed box, which moves when the page scrolls:
+ * only its own rows are computed again then (stick_apply()).
+ *
+ * ink_bounds() runs at the first paint after a layout (the layout's
+ * inked is 0 then): nothing else moves boxes.
+ */
+int paint_no_cull;		/* tests: paint without it, to compare */
+
+static void ink_y(float *r, float y0, float y1)
+{
+	if (y0 != y0 || y1 != y1) {
+		r[0] = -1e30f;		/* not a number: anywhere */
+		r[1] = 1e30f;
+		return;
+	}
+	if (y0 < r[0])
+		r[0] = y0;
+	if (y1 < r[0])
+		r[0] = y1;
+	if (y0 > r[1])
+		r[1] = y0;
+	if (y1 > r[1])
+		r[1] = y1;
+}
+
+/* How far over and under a box's or a fragment's border box its
+ * painting reaches: 2 for the snapping, the shadows, the outline (a
+ * negative offset puts its sides past the opposite edges) */
+static float ink_margin(const struct style *st)
+{
+	float e, o;
+
+	if (!st)
+		return 2;
+	e = shadow_reach(st) + 2;
+	o = 2 * st->v[P_OUTLINE_WIDTH].u.len.px +
+		fabsf(st->v[P_OUTLINE_OFFSET].u.len.px) + 2;
+	if (o != o || e != e)
+		return 1e30f;
+	return o > e ? o : e;
+}
+
+/* Does an image list (background-image, mask-image) name a file */
+static int names_url(const char *s)
+{
+	for (; s && *s; s++)
+		if ((s[0] == 'u' || s[0] == 'U') && (s[1] == 'r' ||
+		    s[1] == 'R') && (s[2] == 'l' || s[2] == 'L'))
+			return 1;
+	return 0;
+}
+
+void ink_bounds(struct box *b)
+{
+	const struct style *st = b->style;
+	float r[2] = { 1e30f, -1e30f }, m[6], e;
+	struct box *k;
+	int i;
+
+	if (b->type != B_TEXT && b->type != B_BREAK) {
+		/* an inline box has its backgrounds painted by fragments
+		 * (below); from its own geometry, an outline at most */
+		if (b->type != B_INLINE || (st &&
+		    !(st->v[P_OUTLINE_WIDTH].u.len.px <= 0) &&
+		    !kw(st, P_OUTLINE_STYLE, "none"))) {
+			e = ink_margin(st);
+			ink_y(r, b->y - b->p[0] - b->b[0] - e, b->y + b->h +
+				b->p[2] + b->b[2] + e);
+		}
+		if ((b->type == B_REPLACED && b->node) || (st &&
+		    (box_transform(b, m) == 2 ||
+		    names_url(st->v[P_BACKGROUND_IMAGE].u.str) ||
+		    names_url(st->v[P_MASK_IMAGE].u.str))))
+			ink_y(r, -1e30f, 1e30f);
+	}
+	/* what negatives() takes for a layer: a text box too, which has
+	 * the style of its element */
+	if (st && positioned(b) && zindex(b) < 0)
+		ink_y(r, -1e30f, 1e30f);
+	for (i = 0; i < b->nfrags; i++) {
+		const struct frag *f = &b->frags[i];
+
+		if (f->kind == F_TEXT) {
+			float em = f->box->style->v[P_FONT_SIZE].u.len.px;
+
+			ink_y(r, f->baseline - 2 * em, f->baseline + em);
+		} else if (f->kind == F_INLINE) {
+			e = ink_margin(f->box->style);
+			ink_y(r, f->y - e, f->y + f->h + e);
+		}
+	}
+	/* the ellipsis a line clamp ends a line with, in the box's font */
+	if (st)
+		for (i = 0; i < b->nlines; i++) {
+			float em = st->v[P_FONT_SIZE].u.len.px;
+
+			ink_y(r, b->lines[i].baseline - 2 * em,
+				b->lines[i].baseline + em);
+		}
+	for (k = b->first; k; k = k->next) {
+		ink_bounds(k);
+		if (k->iy0 <= k->iy1)	/* a text box has none of its own */
+			ink_y(r, k->iy0, k->iy1);
+		/* one that stick_apply() may move */
+		if (k->style && k->type != B_INLINE && k->type != B_TEXT &&
+		    (kw(k->style, P_POSITION, "sticky") ||
+		    kw(k->style, P_POSITION, "fixed")))
+			ink_y(r, -1e30f, 1e30f);
+	}
+	b->iy0 = r[0];
+	b->iy1 = r[1];
+}
+
+/* Nothing of b's subtree is painted in this canvas */
+static int culled(const struct canvas *c, const struct box *b)
+{
+	return !paint_no_cull && (b->iy1 < c->oy || b->iy0 > c->oy +
+		(float)c->h);
 }
 
 /* Where b and everything below it are, untransformed */
@@ -2041,6 +2486,8 @@ static void paint_box(struct canvas *c, struct box *b, int stacking)
 	struct canvas msave, rsave;
 	int mk, rk, fbase = nfl;
 
+	if (culled(c, b))
+		return;
 	if (!stacking && positioned(b) && b->parent) {
 		zadd(b);
 		return;
@@ -2122,19 +2569,16 @@ static void paint_box(struct canvas *c, struct box *b, int stacking)
 
 static void paint_layer(struct canvas *c, struct box *b);
 
-static int zindex(const struct box *b)
-{
-	return b->style->v[P_Z_INDEX].kw ? 0 :
-		(int)b->style->v[P_Z_INDEX].u.num;
-}
-
 /* The negative z-index layers of the context b is the root of, not
  * those in the contexts they make */
-static void negatives(struct box *b, struct zent **v, int *n, int *cap)
+static void negatives(const struct canvas *c, struct box *b,
+	struct zent **v, int *n, int *cap)
 {
 	struct box *k;
 
 	for (k = b->first; k; k = k->next) {
+		if (culled(c, k))
+			continue;	/* nor a layer below it: none shows */
 		if (positioned(k)) {
 			if (zindex(k) < 0) {
 				if (*n == *cap) {
@@ -2153,7 +2597,7 @@ static void negatives(struct box *b, struct zent **v, int *n, int *cap)
 		 * they are not this context's */
 		if (transformed(k))
 			continue;
-		negatives(k, v, n, cap);
+		negatives(c, k, v, n, cap);
 	}
 }
 
@@ -2179,6 +2623,8 @@ static void paint_context(struct canvas *c, struct box *b)
 	struct zent *outer = zlist, *neg = NULL;
 	float tm[6];
 
+	if (culled(c, b))
+		return;
 	/* transformed: all of it through its matrix, its background and
 	 * its negative layers too (they were painted upright as well) */
 	if (b != tf_now && b->style && b->parent && box_transform(b, tm) == 2 &&
@@ -2196,7 +2642,7 @@ static void paint_context_in(struct canvas *c, struct box *b,
 
 	zlist = NULL;
 	nz = capz = 0;
-	negatives(b, &neg, &nneg, &capneg);
+	negatives(c, b, &neg, &nneg, &capneg);
 	if (nneg) {
 		c->alpha *= op;
 		if (b->type != B_INLINE && b->parent &&
@@ -2469,6 +2915,10 @@ static int paint(soie_node *doc, unsigned char *rgba, int width, int height,
 	if (!root) {
 		memset(rgba, 255, (size_t)stride * (size_t)height);
 		return 0;
+	}
+	if (!doc->u.doc->layout->inked) {
+		ink_bounds(root);
+		doc->u.doc->layout->inked = 1;
 	}
 	r[0] = sx;
 	r[1] = sy;

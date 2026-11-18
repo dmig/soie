@@ -64,6 +64,9 @@ static inline int iceil(float v)
 }
 
 extern soie_node *paint_doc;
+/* Set by tests: boxes out of the canvas are painted (and clipped) all
+ * the same, to compare with what culling leaves */
+extern int paint_no_cull;
 extern unsigned paint_pass;	/* counts the paints: soie_paint() calls */
 
 /* The polygon of n points x, y (page coordinates), anti-aliased:
