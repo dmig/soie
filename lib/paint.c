@@ -156,10 +156,10 @@ static void blend(struct canvas *c, int x, int y, const unsigned char *rgba,
 
 	if (x < c->cx0 || y < c->cy0 || x >= c->cx1 || y >= c->cy1)
 		return;
-	a = rgba[3] * cov / 255;
+	a = div255(rgba[3] * cov);
 	a = (int)((float)a * c->alpha + 0.5f);
 	if (c->mask)
-		a = a * mask_at(c, x, y) / 255;
+		a = div255(a * mask_at(c, x, y));
 	if (a <= 0)
 		return;
 	p = c->px + (size_t)y * (size_t)c->stride + (size_t)x * 4;
@@ -170,10 +170,10 @@ static void blend(struct canvas *c, int x, int y, const unsigned char *rgba,
 		p[3] = 255;
 		return;
 	}
-	p[0] = (unsigned char)((rgba[r] * a + p[0] * (255 - a)) / 255);
-	p[1] = (unsigned char)((rgba[1] * a + p[1] * (255 - a)) / 255);
-	p[2] = (unsigned char)((rgba[2 - r] * a + p[2] * (255 - a)) / 255);
-	p[3] = (unsigned char)(a + p[3] * (255 - a) / 255);
+	p[0] = (unsigned char)div255(rgba[r] * a + p[0] * (255 - a));
+	p[1] = (unsigned char)div255(rgba[1] * a + p[1] * (255 - a));
+	p[2] = (unsigned char)div255(rgba[2 - r] * a + p[2] * (255 - a));
+	p[3] = (unsigned char)(a + div255(p[3] * (255 - a)));
 }
 
 /* An opaque color, no group opacity, no mask: covered pixels just

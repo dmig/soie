@@ -1,5 +1,6 @@
 /*
- * Unit tests for the public API: DOM mutation, charsets, entities.
+ * Unit tests for the public API: DOM mutation, charsets, entities;
+ * and of one internal: div255().
  *
  * Copyright (C) 2026 Christophe Lincoln <pankso@slitaz.org>
  * Written with the assistance of Claude (Anthropic) and Opencode.
@@ -10,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <soie/soie.h>
+#include "paint.h"		/* div255() */
 
 static int failures;
 
@@ -846,9 +848,22 @@ static void test_sheet_urls(void)
 	soie_node_free(doc);
 }
 
+/* div255() is the division it stands for, for all it is given: a byte
+ * times a byte, or the sum of two that blend to 255 * 255 at most */
+static void test_div255(void)
+{
+	int x, bad = 0;
+
+	for (x = 0; x <= 255 * 255; x++)
+		if (div255(x) != x / 255)
+			bad++;
+	CHECK(bad == 0);
+}
+
 int main(void)
 {
 	soie_fonts_stub(1);
+	test_div255();
 	test_dom();
 	test_shadow();
 	test_shadow_claim();

@@ -11,6 +11,7 @@
  */
 #include <png.h>		/* first: libpng 1.2 wants its own setjmp.h */
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -574,7 +575,7 @@ static void blend_px(struct canvas *c, int x, int y, const unsigned char *s,
 		return;
 	al = (int)(s[3] * a * c->alpha + 0.5f);
 	if (c->mask)
-		al = al * mask_at(c, x, y) / 255;
+		al = div255(al * mask_at(c, x, y));
 	if (al <= 0)
 		return;
 	p = c->px + (size_t)y * (size_t)c->stride + (size_t)x * 4;
@@ -585,10 +586,10 @@ static void blend_px(struct canvas *c, int x, int y, const unsigned char *s,
 		p[3] = 255;
 		return;
 	}
-	p[0] = (unsigned char)((s[r] * al + p[0] * (255 - al)) / 255);
-	p[1] = (unsigned char)((s[1] * al + p[1] * (255 - al)) / 255);
-	p[2] = (unsigned char)((s[2 - r] * al + p[2] * (255 - al)) / 255);
-	p[3] = (unsigned char)(al + p[3] * (255 - al) / 255);
+	p[0] = (unsigned char)div255(s[r] * al + p[0] * (255 - al));
+	p[1] = (unsigned char)div255(s[1] * al + p[1] * (255 - al));
+	p[2] = (unsigned char)div255(s[2 - r] * al + p[2] * (255 - al));
+	p[3] = (unsigned char)(al + div255(p[3] * (255 - al)));
 }
 
 /* Image into the page rect (x, y, w, h), bilinear, clipped. */
@@ -885,6 +886,15 @@ struct gradient {
 	float cx, cy;		/* radial, conic: the centre, in the tile */
 	float rx, ry;		/* radial */
 	float from;		/* conic: the start angle, turns */
+	/* its table (grad_table()), NULL without one */
+	unsigned char *tab;	/* a cell: the color as the canvas orders
+				 * it, its alpha times the group's */
+	unsigned char *state;	/* a cell: GRAD_EVEN..., 0 not known yet */
+	unsigned char *have;	/* a cell: 1 when its color is in tab */
+	int ncell, first;	/* first: the cell of the first stop */
+	double scale;		/* cells per pixel of the line; radial: per
+				 * unit of the squared distance in radii */
+	float step;		/* the shortest cell, px */
 };
 
 #define MAX_STOPS 1024
@@ -1042,7 +1052,7 @@ static void stop_color(const struct gradient *g, float t, unsigned char *out)
 			t += s[0].pos;
 		}
 	}
-	if (isnan(t) || t <= s[0].pos) {
+	if (t != t || t <= s[0].pos) {	/* NaN: isnan() is a call at -Os */
 		a = s[0].c;
 	} else if (t >= s[n - 1].pos) {
 		a = s[n - 1].c;
@@ -1294,6 +1304,286 @@ static int gradient_parse(const struct cv *f, const struct style *st,
 	return parse_stops(&cu, st, g, current);
 }
 
+/* Where the pixel centre (px, py) of a tile of w x h is on the line */
+static float grad_t(const struct gradient *g, float px, float py, float w,
+	float h)
+{
+	float t;
+
+	if (g->kind == 'l') {
+		t = (px - w / 2) * g->dx + (py - h / 2) * g->dy + g->len / 2;
+	} else if (g->kind == 'r') {
+		float ex = px - g->cx, ey = py - g->cy;
+
+		if (g->rx <= 0 || g->ry <= 0)
+			t = 1e30f;
+		else
+			t = sqrtf(ex * ex / (g->rx * g->rx) +
+				ey * ey / (g->ry * g->ry)) * g->rx;
+	} else {
+		t = atan2f(px - g->cx, g->cy - py) / (2 * (float)M_PI) -
+			g->from;
+		t -= floorf(t);
+	}
+	return t;
+}
+
+/*
+ * The table of a gradient: its colors along the line, so that a pixel
+ * is an index and a store or an integer blend instead of stop_color()
+ * and its floats. Cells are an eighth of a pixel long or more,
+ * GRAD_CELLS at most; a linear gradient's are even along the line, a
+ * radial one's along the square of the distance (no square root per
+ * pixel).
+ *
+ * A cell holds the color at its start. Its pixels take it when the
+ * cell is even: no stop in it, where the mix turns, the same alpha at
+ * its two ends and colors one level apart at most. They are then
+ * within one level of what stop_color() gives, and stay so under any
+ * number of layers: with the same alpha, a level in the color or in
+ * what is below is a level at most once blended; a level of alpha
+ * would add up. The pixels of the other cells are computed as before:
+ * a hard stop is as sharp as it was, at the same pixels, and a steep
+ * gradient is what it was. The index is fixed point and may be one
+ * cell away from where the floats of the exact path put a pixel: the
+ * two cells around count too.
+ *
+ * A pixel of the page gets the same color whatever is painted of it
+ * (the whole page, the band a scroll brought in, a rectangle): bands
+ * are compared with the whole byte for byte. So nothing here looks at
+ * the canvas' clip, origin or size: the table's cells and what each
+ * is depend on the gradient alone, a pixel's index on its place in
+ * the tile. Cells are filled when a pixel first falls in them: a band
+ * of a tall gradient computes the few it crosses.
+ */
+#define GRAD_CELLS 4096
+#define GRAD_BIAS (1 << 30)	/* keeps the fixed point index positive */
+/* what a cell is */
+#define GRAD_EVEN 1		/* its pixels take its color */
+#define GRAD_UNEVEN 2		/* its colors differ: they are computed */
+#define GRAD_STOP 3		/* a stop in it or next to it: computed */
+
+/* Where t is in the table, in cells */
+static double grad_cell(const struct gradient *g, double t)
+{
+	if (g->kind == 'r')
+		return t / g->rx * (t / g->rx) * g->scale;
+	return (t - g->s[0].pos) * g->scale + g->first;
+}
+
+/* Color b for a: the same alpha, a level at most between the colors */
+static int colors_even(const unsigned char *a, const unsigned char *b)
+{
+	if (a[3] != b[3])
+		return 0;
+	/* nothing is painted with no alpha: any color will do */
+	return !a[3] || (abs(a[0] - b[0]) <= 1 && abs(a[1] - b[1]) <= 1 &&
+		abs(a[2] - b[2]) <= 1);
+}
+
+/* The color at t as the table keeps it: in the canvas' order, its
+ * alpha times the group's as blend_px() does */
+static void grad_color(const struct gradient *g, const struct canvas *c,
+	float t, unsigned char *e)
+{
+	unsigned char col[4];
+	int r = c->bgr ? 2 : 0;
+
+	stop_color(g, t, col);
+	e[0] = col[r];
+	e[1] = col[1];
+	e[2] = col[2 - r];
+	e[3] = (unsigned char)(int)((float)col[3] * c->alpha + 0.5f);
+}
+
+/* The table of g, empty; none (g->tab stays NULL) for the gradients
+ * it cannot be right for */
+static void grad_table(struct gradient *g)
+{
+	float p0 = g->s[0].pos, p1 = g->s[g->n - 1].pos, range = p1 - p0;
+	int n, i, k, m;
+
+	if (!(range >= 0) || !(fabsf(p0) < 1e6f) || !(p1 < 1e6f))
+		return;
+	if (g->kind == 'l' && !g->repeating) {
+		/* three cells before the first stop and after the last
+		 * one: the outer ones are all that is beyond */
+		float step = range > GRAD_CELLS * 0.125f ? range / GRAD_CELLS :
+			0.125f;
+
+		g->scale = 1 / step;
+		g->first = 3;
+		n = (int)(range * g->scale) + 7;
+	} else if (g->kind == 'l') {
+		/* a period is a power of two of cells: the index wraps */
+		for (n = 8; (float)n < range * 4 && n < GRAD_CELLS; n *= 2)
+			;
+		if ((float)n > range * 8)
+			return;
+		g->scale = n / range;
+	} else if (g->kind == 'r' && !g->repeating && g->rx > 0 &&
+		   g->ry > 0 && p1 >= 1) {
+		/* from the centre to the last stop, where a cell is the
+		 * shortest: p1 / 2n; then two cells and all the rest */
+		n = p1 * 4 < GRAD_CELLS ? (int)(p1 * 4) : GRAD_CELLS;
+		g->scale = n / ((double)p1 / g->rx * ((double)p1 / g->rx));
+		g->step = p1 / (float)(2 * n);
+		n += 3;
+	} else {
+		return;
+	}
+	if (g->kind == 'l')
+		g->step = (float)(1 / g->scale);
+	g->ncell = n;
+	g->tab = xmalloc((size_t)n * 6 + 5);
+	g->state = g->tab + (size_t)n * 4 + 4;
+	g->have = g->state + n;
+	memset(g->state, 0, (size_t)n * 2 + 1);
+	/* a stop: its cell (two when it is where they meet) and the
+	 * ones around */
+	for (i = 0; i < g->n; i++) {
+		double u = g->s[i].pos < 0 && g->kind == 'r' ? -9 :
+			grad_cell(g, g->s[i].pos);
+
+		if (!(u >= -4 && u <= n + 4))
+			continue;
+		m = (int)floor(u);
+		for (k = m - 2; k <= m + 1; k++)
+			if (g->repeating)
+				g->state[k & (n - 1)] = GRAD_STOP;
+			else if (k >= 0 && k < n)
+				g->state[k] = GRAD_STOP;
+	}
+	/* the outer cells are not a stop's: see grad_state() */
+	if (!g->repeating) {
+		g->state[n - 1] = 0;
+		if (g->kind == 'l')
+			g->state[0] = 0;
+	}
+}
+
+/* The color at the start of cell k, computed the first time */
+static const unsigned char *grad_edge(const struct gradient *g,
+	const struct canvas *c, int k)
+{
+	unsigned char *e = g->tab + (size_t)k * 4;
+
+	if (!g->have[k]) {
+		grad_color(g, c, g->kind == 'r' ?
+			g->rx * sqrtf((float)(k / g->scale)) :
+			g->s[0].pos + (float)((k - g->first) / g->scale), e);
+		g->have[k] = 1;
+	}
+	return e;
+}
+
+/* What cell k is, found when a pixel first falls in it: from its
+ * color and those of the cell before, of the next one and of that
+ * one's end */
+static int grad_state(const struct gradient *g, const struct canvas *c,
+	int k)
+{
+	const unsigned char *e = grad_edge(g, c, k);
+	int n = g->ncell, s;
+
+	if (!g->repeating && (k == n - 1 || (k == 0 && g->kind == 'l')))
+		/* beyond the stops: the first or the last color, for sure */
+		s = GRAD_EVEN;
+	else if (k == 0 || k == n - 1)
+		s = GRAD_UNEVEN;
+	else
+		s = colors_even(e, grad_edge(g, c, k - 1)) &&
+			colors_even(e, grad_edge(g, c, k + 1)) &&
+			colors_even(e, grad_edge(g, c, k + 2)) ? GRAD_EVEN :
+			GRAD_UNEVEN;
+	g->state[k] = (unsigned char)s;
+	return s;
+}
+
+/* The cell of the fixed point index v */
+static inline int grad_index(const struct gradient *g, uint64_t v)
+{
+	int k = (int)(v >> 32);
+
+	if (g->repeating)
+		return k & (g->ncell - 1);
+	k -= GRAD_BIAS;
+	return k < 0 ? 0 : k >= g->ncell ? g->ncell - 1 : k;
+}
+
+/* The rows of a tile, each pixel's color computed: every gradient
+ * without a table */
+static void grad_exact(struct canvas *c, const struct gradient *g, float x,
+	float y, float w, float h, int i0, int j0, int i1, int j1)
+{
+	int i, j;
+
+	for (j = j0; j < j1; j++) {
+		float py = (float)j + c->oy + 0.5f - y;
+		unsigned char col[4] = { 0, 0, 0, 0 };
+		float tl = NAN;
+
+		for (i = i0; i < i1; i++) {
+			float px = (float)i + c->ox + 0.5f - x;
+			float t = grad_t(g, px, py, w, h);
+
+			/* the same place on the line: the same color (the
+			 * rows of a horizontal gradient) */
+			if (t != tl) {
+				stop_color(g, t, col);
+				tl = t;
+			}
+			blend_px(c, i, j, col, 1);
+		}
+	}
+}
+
+/* Pixel p (i, j of the canvas) takes the table's color e */
+static inline void grad_put(const struct canvas *c, unsigned char *p,
+	const unsigned char *e, int i, int j)
+{
+	int al = e[3], na;
+
+	if (c->mask)
+		al = div255(al * mask_at(c, i, j));
+	if (al == 255) {
+		memcpy(p, e, 4);
+	} else if (al > 0) {
+		na = 255 - al;
+		p[0] = (unsigned char)div255(e[0] * al + p[0] * na);
+		p[1] = (unsigned char)div255(e[1] * al + p[1] * na);
+		p[2] = (unsigned char)div255(e[2] * al + p[2] * na);
+		p[3] = (unsigned char)(al + div255(p[3] * na));
+	}
+}
+
+/*
+ * Row j of a tile from the table. A pixel's cell is v >> 32; v grows
+ * by d from a pixel to the next, and d by dd: nothing for a linear
+ * gradient, while a radial one's index is a square, whose second
+ * difference is constant. Unsigned 64 bits: they wrap, and on a 32-bit
+ * machine the index is the high word as it is.
+ */
+static void grad_row(struct canvas *c, const struct gradient *g, float x,
+	float y, float w, float h, int j, int i0, int i1, uint64_t v,
+	uint64_t d, uint64_t dd)
+{
+	unsigned char *p = c->px + (size_t)j * (size_t)c->stride +
+		(size_t)i0 * 4;
+	int i;
+
+	for (i = i0; i < i1; i++, p += 4, v += d, d += dd) {
+		int k = grad_index(g, v), s = g->state[k];
+
+		if (!s)
+			s = grad_state(g, c, k);
+		if (s == GRAD_EVEN)
+			grad_put(c, p, g->tab + (size_t)k * 4, i, j);
+		else
+			grad_exact(c, g, x, y, w, h, i, j, i + 1, j + 1);
+	}
+}
+
 /* One tile of gradient g at (x, y), w x h, inside the canvas clip */
 static void gradient_draw(struct canvas *c, const struct gradient *g,
 	float x, float y, float w, float h)
@@ -1302,8 +1592,9 @@ static void gradient_draw(struct canvas *c, const struct gradient *g,
 		c->ox + 0.5f);
 	int j0 = ifloor(y - c->oy + 0.5f), j1 = ifloor(y + h -
 		c->oy + 0.5f);
-	float half = g->len / 2;
-	int i, j;
+	double a = 0, bx, by, u, far, col, lx;
+	int64_t n0;
+	int i, j, k, s, flat;
 
 	if (i0 < c->cx0)
 		i0 = c->cx0;
@@ -1313,39 +1604,103 @@ static void gradient_draw(struct canvas *c, const struct gradient *g,
 		i1 = c->cx1;
 	if (j1 > c->cy1)
 		j1 = c->cy1;
+	if (i0 >= i1 || j0 >= j1)
+		return;
+	/* The exact path's floats are good to 2^-21 or so of the largest
+	 * number they meet: the table's index must stay within a cell of
+	 * them. Far down a page (32768 px for cells of 1/8) the tile is
+	 * exact. */
+	far = fmax(fabsf(x) + w, fabsf(y) + h);
+	if (g->kind == 'r')
+		far = fmax(far, fmax(fabsf(g->cx), fabsf(g->cy)));
+	if (!g->tab || !(far < g->step * 262144.)) {
+		grad_exact(c, g, x, y, w, h, i0, j0, i1, j1);
+		return;
+	}
+	/* the index of the pixel whose centre is at (lx, ly) in the
+	 * tile, in cells: a + lx bx + ly by for a linear gradient,
+	 * bx (lx - cx)^2 + by (ly - cy)^2 for a radial one; small enough
+	 * at the tile's corners for the fixed point, so in all of it */
+	if (g->kind == 'l') {
+		bx = g->dx * g->scale;
+		by = g->dy * g->scale;
+		a = grad_cell(g, g->len / 2 - (double)w / 2 * g->dx -
+			(double)h / 2 * g->dy);
+		u = fabs(a) + (fabs(bx) + fabs(by)) * 2 + fabs(bx) * w +
+			fabs(by) * h;
+	} else {
+		double ex = fmax(fabs(g->cx), fabs(w - g->cx)) + 2;
+		double ey = fmax(fabs(g->cy), fabs(h - g->cy)) + 2;
+
+		bx = g->scale / ((double)g->rx * g->rx);
+		by = g->scale / ((double)g->ry * g->ry);
+		u = bx * ex * ex + by * ey * ey;
+	}
+	if (!(u < 1e8)) {
+		grad_exact(c, g, x, y, w, h, i0, j0, i1, j1);
+		return;
+	}
+	/* a vertical gradient: a row is one place on the line */
+	flat = g->kind == 'l' && fabs(bx) * (w + 2) < 1. / 64;
+	/* Rows start from the tile's first column of pixels, not from the
+	 * clip's: the index of column i0 is what n0 additions from there
+	 * give, and a pixel has the same whatever the clip. lx: that
+	 * column's centre in the tile. */
+	col = i0 + (double)c->ox - floor(x);
+	n0 = (int64_t)floor(col);
+	lx = floor(x) + (col - floor(col)) + 0.5 - x;
 	for (j = j0; j < j1; j++) {
-		float py = (float)j + c->oy + 0.5f - y;
-		unsigned char col[4], last[4] = { 0, 0, 0, 0 };
-		float tl = NAN;
+		unsigned char *p = c->px + (size_t)j * (size_t)c->stride +
+			(size_t)i0 * 4;
+		double ly = j + (double)c->oy + 0.5 - y;
+		uint64_t v, v0, d, dd = 0;
+		unsigned char e0[4], e1[4];
+		const unsigned char *e;
 
-		for (i = i0; i < i1; i++) {
-			float px = (float)i + c->ox + 0.5f - x, t;
+		if (g->kind == 'l') {
+			u = a + lx * bx + ly * by;
+			d = (uint64_t)(int64_t)(bx * 4294967296.);
+		} else {
+			double ex = lx - g->cx, ey = ly - g->cy;
 
-			if (g->kind == 'l') {
-				t = (px - w / 2) * g->dx + (py - h / 2) * g->dy +
-					half;
-			} else if (g->kind == 'r') {
-				float ex = px - g->cx, ey = py - g->cy;
-
-				if (g->rx <= 0 || g->ry <= 0)
-					t = 1e30f;
-				else
-					t = sqrtf(ex * ex / (g->rx * g->rx) +
-						ey * ey / (g->ry * g->ry)) * g->rx;
-			} else {
-				t = atan2f(px - g->cx, g->cy - py) /
-					(2 * (float)M_PI) - g->from;
-				t -= floorf(t);
-			}
-			/* the same place on the line: the same color (the
-			 * rows of a horizontal gradient) */
-			if (t != tl) {
-				stop_color(g, t, col);
-				memcpy(last, col, 4);
-				tl = t;
-			}
-			blend_px(c, i, j, last, 1);
+			u = bx * ex * ex + by * ey * ey;
+			d = (uint64_t)(int64_t)(bx * (2 * ex + 1) * 4294967296.);
+			dd = (uint64_t)(bx * 2 * 4294967296.);
 		}
+		v0 = (uint64_t)((u + GRAD_BIAS) * 4294967296.);
+		v = v0 + (uint64_t)n0 * d + (uint64_t)(n0 * (n0 - 1) / 2) * dd;
+		d += (uint64_t)n0 * dd;
+		if (!flat) {
+			grad_row(c, g, x, y, w, h, j, i0, i1, v, d, dd);
+			continue;
+		}
+		/* the row's cell: the first column's */
+		k = grad_index(g, v0);
+		if (!(s = g->state[k]))
+			s = grad_state(g, c, k);
+		e = g->tab + (size_t)k * 4;
+		if (s == GRAD_UNEVEN) {
+			/* the colors half a cell before and after, further
+			 * than the exact path's floats are from here: the
+			 * same, and the row has one */
+			float t = g->s[0].pos + (float)((u - g->first) /
+				g->scale);
+
+			grad_color(g, c, t - g->step / 2, e0);
+			grad_color(g, c, t + g->step / 2, e1);
+			if (colors_even(e0, e1)) {
+				e = e0;
+				s = GRAD_EVEN;
+			}
+		}
+		if (s != GRAD_EVEN)
+			grad_row(c, g, x, y, w, h, j, i0, i1, v, d, dd);
+		else if (e[3] == 255 && !c->mask)
+			for (i = i0; i < i1; i++, p += 4)
+				memcpy(p, e, 4);
+		else if (e[3])
+			for (i = i0; i < i1; i++, p += 4)
+				grad_put(c, p, e, i, j);
 	}
 }
 
@@ -1630,6 +1985,8 @@ static void paint_layers(struct canvas *c, const struct box *b, int img_p,
 		if (kw_ > 0 && kh > 0) {
 			nx = tiles(mx, ax, aw, iw, ox, kx, kx + kw_, &fx, &gx);
 			ny = tiles(my, ay, ah, ih, oy, ky, ky + kh, &fy, &gy);
+			if (grad)
+				grad_table(&g);
 			for (iy = 0; iy < ny; iy++)
 				for (ix = 0; ix < nx; ix++) {
 					float tx = fx + (float)ix * (iw + gx);
@@ -1642,8 +1999,10 @@ static void paint_layers(struct canvas *c, const struct box *b, int img_p,
 							cur, st);
 				}
 		}
-		if (grad)
+		if (grad) {
 			free(g.s);
+			free(g.tab);
+		}
 		c->cx0 = cx0;
 		c->cy0 = cy0;
 		c->cx1 = cx1;

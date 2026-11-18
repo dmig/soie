@@ -97,6 +97,17 @@ lib/libsoie.so.$(SOVERSION): $(LIB_OBJS)
 		-o $@ $(LIB_OBJS) $(LIBS)
 
 $(LIB_OBJS): $(HEADERS) $(INTERNAL)
+
+# The pixel loops (fills, blends and glyphs in paint.c, images and
+# gradients, SVG) are built for speed whatever CFLAGS says: a
+# distribution's -Os keeps their divisions and costs a quarter of the
+# paint time to save 20 KB. Without errno to set, sqrtf() is one SSE
+# instruction (the x87 still calls it under -std=c99). The rest keeps
+# the -O it was given. `override`: a CFLAGS on make's command line
+# would win over a plain +=; make FAST_CFLAGS= turns this off (a debug
+# build at -O0).
+FAST_CFLAGS = -O2 -fno-math-errno
+lib/paint.o lib/image.o lib/svg.o: override CFLAGS += $(FAST_CFLAGS)
 lib/tokenizer.o: lib/entities.inc
 
 # The user agent style sheet, as a C string.
@@ -123,11 +134,14 @@ ext/media.so: EXT_LIBS = $(shell pkg-config --libs $(MEDIA_PKGS)) -lpthread \
 ext/webp.so: CPPFLAGS += $(shell pkg-config --cflags libwebp)
 ext/webp.so: EXT_LIBS = $(shell pkg-config --libs libwebp)
 
-# 64-bit atomics (Atomics, SharedArrayBuffer) need libatomic on i486
+# 64-bit atomics (Atomics, SharedArrayBuffer) need libatomic on i486.
+# QuickJS at -O2 -fwrapv as its own Makefile does, whatever CFLAGS
+# says: it counts on signed integers that wrap.
 QJS_ATOMIC = $(shell echo 'int main(void){return 0;}' | \
 	$(CC) -x c - -latomic -o /dev/null 2>/dev/null && echo -latomic)
 ext/script/qjs-%.o: $(QUICKJS_SRC)/%.c
-	$(CC) $(CFLAGS:-pedantic=) -std=gnu99 -w -fPIC -DNDEBUG -D_GNU_SOURCE \
+	$(CC) $(CFLAGS:-pedantic=) -std=gnu99 -w -fPIC -O2 -fwrapv \
+		-DNDEBUG -D_GNU_SOURCE \
 		-DCONFIG_VERSION=\"$$(cat $(QUICKJS_SRC)/VERSION)\" \
 		-c -o $@ $<
 
@@ -283,6 +297,7 @@ tests/csstest.o tests/cssvalue.o: $(INTERNAL)
 
 tools/soie-render.o tests/html5lib.o tests/unit.o tests/painttest.o \
 	tests/exttest.o: $(HEADERS)
+tests/unit.o: $(INTERNAL)
 tests/csstest.o tests/cssvalue.o: CPPFLAGS += -Ilib
 
 # Tests run with glibc filling freed memory: a use after free shows.

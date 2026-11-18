@@ -36,6 +36,14 @@ static inline int mask_at(const struct canvas *c, int x, int y)
 		(size_t)(x - c->mx0)];
 }
 
+/* x / 255 rounded down, for x in 0..65534 (a byte times a byte is
+ * 65025 at most): two shifts whatever the compiler's -O, where -Os
+ * keeps a division (tests/unit.c tries every x) */
+static inline int div255(int x)
+{
+	return (x + 1 + (x >> 8)) >> 8;
+}
+
 /* A page coordinate as a pixel index: bounded first, a box ten
  * billion pixels away does not fit an int (the conversion is then
  * undefined, and gave clips larger than the canvas) */
