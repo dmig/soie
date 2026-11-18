@@ -36,6 +36,7 @@ struct _SoieView {
 	gboolean full, changed;	/* repaint all of it, what changed */
 	guint timer;		/* the shell's next tick */
 	guint idle;		/* a tick after input */
+	guint late;		/* a redraw after the queued input */
 	GtkIMContext *im;
 	GtkAdjustment *hadj, *vadj;
 	guint hpolicy, vpolicy;
@@ -458,6 +459,25 @@ static gboolean draw(GtkWidget *w, cairo_t *cr)
 	return TRUE;
 }
 
+static gboolean on_late(gpointer data)
+{
+	SoieView *v = data;
+
+	v->late = 0;
+	redraw(v);
+	return G_SOURCE_REMOVE;
+}
+
+/* A redraw once the queued events are read, before GTK draws: a machine
+ * that paints slower than the wheel turns jumps, it does not fall
+ * behind */
+static void redraw_soon(SoieView *v)
+{
+	if (!v->late)
+		v->late = g_idle_add_full(G_PRIORITY_HIGH_IDLE, on_late, v,
+			NULL);
+}
+
 static void size_allocate(GtkWidget *w, GtkAllocation *a)
 {
 	SoieView *v = SOIE_VIEW(w);
@@ -679,7 +699,7 @@ static int key(SoieView *v, const char *k, const char *text, int mods)
 	if (r == 1)
 		v->changed = TRUE;
 	if (r)
-		redraw(v);
+		redraw_soon(v);
 	tick_soon(v);
 	return r;
 }
@@ -1076,7 +1096,7 @@ static gboolean scroll(GtkWidget *w, GdkEventScroll *e)
 	}
 	if (d) {
 		shell_scroll(v->sh, d * v->scale);
-		redraw(v);
+		redraw_soon(v);
 	}
 	return TRUE;
 }
@@ -1089,7 +1109,7 @@ static void vadj_changed(GtkAdjustment *a, gpointer data)
 	if (v->syncing)
 		return;
 	shell_scroll_to(v->sh, (int)(gtk_adjustment_get_value(a) * v->scale));
-	redraw(v);
+	redraw_soon(v);
 }
 
 static void set_vadj(SoieView *v, GtkAdjustment *a)
@@ -1283,7 +1303,9 @@ static void dispose(GObject *o)
 		g_source_remove(v->timer);
 	if (v->idle)
 		g_source_remove(v->idle);
-	v->timer = v->idle = 0;
+	if (v->late)
+		g_source_remove(v->late);
+	v->timer = v->idle = v->late = 0;
 	views = g_list_remove(views, v);
 	if (v->sh) {
 		shell_free(v->sh);

@@ -554,7 +554,7 @@ int main(int argc, char **argv)
 	long mask = ExposureMask | KeyPressMask | ButtonPressMask |
 		ButtonReleaseMask | PointerMotionMask | StructureNotifyMask |
 		FocusChangeMask;
-	int i;
+	int i, late = 0;
 
 	if ((i = front_start("xsoie", argc, argv, &win_w, &win_h)) >= 0)
 		return i;
@@ -639,11 +639,11 @@ int main(int argc, char **argv)
 			front_button((int)ev.xbutton.button, ev.xbutton.x,
 				ev.xbutton.y, mods(ev.xbutton.state) &
 				~SOIE_MOD_ALT);
-			front_redraw();
+			late = 1;
 			break;
 		case ButtonRelease:
 			front_release();
-			front_redraw();
+			late = 1;
 			break;
 		case MotionNotify:
 			/* only the last of consecutive moves */
@@ -656,16 +656,16 @@ int main(int argc, char **argv)
 				XNextEvent(dpy, &ev);
 			}
 			front_motion(ev.xmotion.x, ev.xmotion.y);
-			front_redraw();
+			late = 1;
 			break;
 		case KeyPress:
 			last = ev.xkey.time;
 			key(&ev.xkey);
-			front_redraw();
+			late = 1;
 			break;
 		case SelectionNotify:
 			pasted(&ev.xselection);
-			front_redraw();
+			late = 1;
 			break;
 		case SelectionRequest:
 			give(&ev.xselectionrequest);
@@ -679,6 +679,12 @@ int main(int argc, char **argv)
 			if ((Atom)ev.xclient.data.l[0] == wm_delete)
 				return 0;
 			break;
+		}
+		/* input paints once the queue is empty: a machine that paints
+		 * slower than the wheel turns jumps, it does not fall behind */
+		if (late && !XPending(dpy)) {
+			front_redraw();
+			late = 0;
 		}
 	}
 }
