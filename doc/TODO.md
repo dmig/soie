@@ -57,8 +57,23 @@ by RMSE (the 38 sites survey of 2026-11-03).
 
 ## Speed
 
-- Blurred shadows are not cached (browsers keep nine-patches): 1.3 ms
-  a 200x140 card with a 30px blur, painted again at each repaint.
+- Nothing of the November audit was measured on a real Atom or as a
+  32-bit build: time a wheel notch and the pelote video there.
+- Video: the ALSA path of the frame dropping was only read (tests run
+  without sound); a poster frame for `preload`; the loop filter is off
+  while late (blocks between key frames).
+- A full-width sticky header going down still has its rows painted at
+  each step (keeping its pixels needs a proof that nothing passes
+  over it).
+- dom.js is compiled at the first page of each process (20 ms here,
+  a quarter of a second on an Atom): bytecode made at build time. The
+  UA style sheet is parsed again for each document; var() values are
+  tokenized again per element.
+- Conic and repeating radial gradients, and those whose color and
+  alpha change together, are still computed per pixel.
+- `linear-gradient(red 50%, blue 50%)` on an odd height splits its
+  middle row (sinf of 180 degrees is not 0): exact directions for the
+  four straight angles.
 - A rounded overflow: hidden box paints its content through a mask,
   without the solid fast paths: 18 % slower for a whole page inside
   one.

@@ -7,6 +7,74 @@ each change are in [DECISIONS.md](DECISIONS.md).
 
 ## [Unreleased]
 
+### Added
+- Extension ABI 0.2: `frame_for` and `next_frame` appended to the media
+  hooks (older extensions and engines keep working).
+- file:// URLs answer Range requests: local films are not read whole.
+- `SOIE_MEDIA_SLOW=N` burns N ms per decoded frame (tests of the
+  frame dropping).
+- Library: `soie_layout_images()` asks again for the images that were
+  on their way and tells whether a layout is needed (2), painting the
+  damage is enough (1) or nothing came (0).
+- `SOIE_DEBUG_PAINT=1` checks gsoie's partial redraws too.
+
+### Changed
+- Scrolling: blurred box shadows are kept as nine-part tiles (2 MB at
+  most) instead of blurred at every paint, and a paint leaves the
+  boxes whose subtree is out of the canvas instead of walking the
+  whole tree; sticky and fixed boxes are listed once per layout. A
+  scroll step of the SliTaz home page costs 3.5 times less, same
+  pixels.
+- Faster painting in the distribution's packages: the pixel loops are
+  built at -O2 whatever the CFLAGS (the -Os of the SliTaz packages
+  cost a quarter of the paint time), blends divide by 255 with shifts
+  (div255()). A viewport of www.slitaz.org: 49 ms to 38.
+- Gradients are painted from a table of their colors, filled as
+  pixels need it, with a fixed point index: no float per pixel, no square root
+  for radial gradients, vertical ones fill their rows. Hard stops and
+  steep gradients keep the exact path; the result is within one level
+  per channel of the former one. www.slitaz.org's viewport: 38 ms to
+  26; a 1000x600 linear gradient at 45 degrees: 21 ms to 1.4, a
+  radial one 26 to 2.2.
+- QuickJS built from QUICKJS_SRC is compiled at -O2 -fwrapv whatever
+  the CFLAGS, as upstream requires.
+- Video: frames converted once at the size and in the byte order the
+  page shows them and copied by rows; the page under a playing video
+  is not painted; ticks at the frames' times (60 fps shows 60). A
+  1080p60 clip in a 960 px box: 8.4 s of CPU for 10 s of playback to
+  2.4 s, 217 frames shown to 597.
+- Video on slow machines: late frames are not converted, the decoder
+  skips the loop filter and unreferenced frames, then B-frames, then
+  all but key frames, and comes back when it has time; the page's
+  own slowness makes it convert fewer frames; the sound no longer
+  stops while the page is busy.
+- xsoie and Toile (SoieView) paint a scroll once the queued wheel and
+  key events are read: a slow machine jumps to where the wheel is
+  instead of falling seconds behind.
+- An image that comes after the first paint and does not change its
+  box (width and height given, same natural size) is painted alone, or
+  not at all below the view: no layout, no paint of the whole page.
+  One that changes its box lays out and paints what moved.
+- Late images wait for twice what the last pass cost (200 ms to 2 s),
+  counted from the end of its paint: a slow machine takes more images
+  per pass.
+- A paint no longer asks for an image on its way (`SOIE_FETCH_LATER`):
+  a layout or `soie_layout_images()` does. A host that only paints
+  calls `soie_layout_images()` when its resource came.
+- Scrolling paints sticky and fixed boxes at their width, not the
+  view's, and not the rows the band that came in already painted.
+
+### Fixed
+- The tiles of a repeated background are at the same place whatever
+  part of the page is painted (a band could differ from the whole
+  page by a pixel at tile edges).
+- A page grew at each late image when an inline or text box kept from
+  the last layout was below a moved box (blank space after its end).
+- A fixed box holding text had the whole view painted at each scroll
+  step.
+- The rects of a change reached up to the page's origin when the
+  element held text: much more was painted than what changed.
+
 ## [0.1.8] - 2026-11-16
 
 ### Added

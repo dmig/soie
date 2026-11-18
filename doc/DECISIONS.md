@@ -895,8 +895,8 @@ reversed, edit the entry and say why; do not leave stale rules here.
   the same pixels as the whole page. 12 cases match Firefox. Damage
   takes the shadows' reach. Cost:
   about 1.3 ms a 200x140 card with a 30px blur; a viewport of 16
-  such cards, two shadows each, 25 ms more. No cache of blurred
-  shapes (browsers keep nine-patches): not needed yet.
+  such cards, two shadows each, 25 ms more. Blurred shapes are
+  kept since 2026-11-18 (see "Speed on old machines").
 - Corners are elliptical: a radius in % is of the width across and of
   the height down (border-radius: 50% of a box that is not square is
   an ellipse), and radii that would meet past a side are scaled down
@@ -2913,6 +2913,430 @@ run again):
   need partitioning by site and private window). An image drawn at
   its own size copied (no gain measured). Normal flow blocks are still
   laid out again at each layout.
+
+## Speed on old machines (November 2026)
+
+A second audit, from a report: on a 2011 Acer Aspire One (Atom, the
+32-bit i486 packages, Toile and xsoie alike) scrolling was jerky,
+Firefox smoother, and a local page with a 1080p video at 60 frames a
+second did not play. Measured here first (a wheel notch on
+www.slitaz.org: 11 to 15 ms of xsoie, ten to fifteen times that on the
+Atom; the video: 0.45 core of painting and 0.24 of decoding), then
+each change measured before and after, renders compared with 0.1.8's.
+After: 60 wheel notches 0.52 s of CPU to 0.18 in xsoie (0.58 to 0.22 in
+gsoie), the video's painting 4.5 s of CPU per 10 s to 0.3, its
+decoding 2.4 to 1.7, 60 frames a second shown. Nothing was run on the
+Atom itself, nor as a real i486 library (no 32-bit libc on the
+development machine): the 32-bit figures below are those of loops
+compiled alone.
+
+### Input
+
+- xsoie and SoieView painted once per event, wheel notch or key: a
+  machine that paints slower than events come fell behind, and went on
+  scrolling seconds after the wheel stopped. xsoie now paints when the
+  X queue is empty (the events read meanwhile only move the scroll
+  offset); SoieView paints scrolls and keys from an idle of high
+  priority (redraw_soon()), after the queued events and before GTK
+  draws. wsoie already painted at the pace of its frames. 60 notches
+  sent at once: 0.78 s of CPU to 0.08 in xsoie; on a machine slowed six
+  times (valgrind), 60 notches at 20 a second ended 3 to 4 s late, now
+  with the wheel.
+
+### Shadows and boxes out of the view
+
+- Blurred shadows. Cost, before 2026-11-18: about 1.3 ms a 200x140 card with a 30px
+  blur, at every paint that touched it: a scroll step of the SliTaz
+  home page spent 73% of its time blurring (5.6 ms a step, jerky on
+  an Atom netbook). Blurred shapes are now kept, as browsers do
+  (shadow_tile()): away from its corners and from what the blur reads
+  of them a shape is the same along a side and flat inside, so the
+  middle columns and rows are stored once and a tile is as large as
+  the corners and the blur, whatever the box (a 24px blur: 169x169,
+  29 KB; a 48px one: 301x301, 91 KB). A shape on sixteenths of a pixel
+  (all of them at zoom 1: boxes are snapped) has the tile of the same
+  shape at the origin with its middle cut, shared by every box with
+  these corners and this blur; another (a zoom of 1.1) keeps a tile of
+  its own where it is, since its coverage depends on its place in the
+  last bit of the floats. 32 tiles, 2 MB at most together, the least
+  recently painted dropped; a tile over 1 MB (a blur past about 170px)
+  is not kept and the shadow is blurred at each paint as before
+  (shadow_blurred(), the old code). The pixels are the same, byte for
+  byte: the tile is filled by the same rrect_cov() and the same three
+  box blurs, and what is cut is like what is kept beside it.
+- An outer shadow skips the pixels the border box covers whole (what
+  rrect_cov() answers 255 for without sampling): most of a band under
+  a large box. The box blur multiplies by a reciprocal instead of
+  dividing each sample (the same quotient: the sum times the width is
+  far below 2^32). blend() does no float work when there is no group
+  opacity (alpha 1 gave the same integer).
+
+- A band still walked the whole box tree, each box set up to find
+  itself out of the clip: 1.45 ms for one row of a page of 24000
+  boxes. Each box now keeps the rows its subtree may paint (iy0, iy1:
+  ink_bounds(), paint.c), computed at the first paint after a layout,
+  and paint_box(), negatives() and paint_context() leave a box whose
+  rows do not meet the canvas, with its floats and its layers: they
+  are below it in the tree wherever they are painted from. Rows only:
+  scrolls are vertical and bands as wide as the view, and no rule
+  bounds a glyph across.
+- It must change no pixel, so the rows come from the painting code:
+  the border box, 2 px for the snapping, the outer shadows
+  (shadow_reach()) and the outline (a negative offset counted); the
+  fragments of inline boxes alike; text from 2em over its baseline to
+  1em under, which is how paint_lines() already skips it (the ellipsis
+  of a line clamp now follows that rule too, the one change to what
+  is painted without culling: an ellipsis glyph taller than 2em would
+  be cut in a band). What paints by other rules or does more than
+  paint is everywhere, never left: replaced content (controls and SVG
+  are not clipped to their box, a player paints from its state, an
+  image that has not come is asked for again at each paint), a box
+  with a rotation or a scale, a background or mask image with a url()
+  (asked for when painted: leaving it would load it only when
+  scrolled to), a box whose geometry is not a number, and a layer
+  with a negative z-index: a stacking context that has one paints its
+  own background before its layers and without its mask, not as one
+  that has none, so paint_context_in() must find them all (a text box
+  counts, it has its element's style). Their ancestors are walked,
+  their siblings left.
+- Found on the way, left as they are (culling keeps them, pixel for
+  pixel): a context with negative layers inside another's negative
+  layer makes the outer one paint its background twice, over its
+  layers (bg_done is one variable); a band is not always the whole's
+  pixels when boxes lie on fractions of a pixel (rev 262 too: 37 of
+  about 450 bands and rects differ from the whole on the SliTaz home
+  page at 1000 px).
+- The test is against the canvas, not the clip: a positioned box is
+  painted later, out of the clip its static ancestors had when the
+  walk met it (an absolute box in an overflow: hidden block).
+- What holds a sticky or fixed box is everywhere too; the moving box
+  has its own rows computed again when stick_apply() moves it. Nothing
+  else moves a box between two layouts (a layout makes a new struct
+  layout, inked 0).
+- stick_apply() no longer walks the tree at each scroll: the sticky
+  and fixed boxes are listed once per layout, parents first with
+  their nearest listed ancestor (struct stick). soie_layout_scroll()
+  on the 24000 box page: 0.31 ms to 0.0005.
+- Checked by painting with and without (paint_no_cull, a variable for
+  tests): bands, rects and whole views at scroll offsets over the
+  paint and layout tests, the website, ten mirrored sites, 360 WPT
+  flexbox and grid pages, a page of cases made for it (every row of
+  the page, 87000 pairs), and after random DOM changes
+  (soie_document_update()): 2 million pairs; the kept rows compared
+  with a computation from scratch after each scroll and change. No
+  difference (the random changes found the negative z-index case).
+
+### Sticky and fixed boxes, late images
+
+- shell_paint_scroll() painted each rect of a sticky or fixed box over
+  the full width of the view, and again the rows the band had just
+  painted. It now paints each rect at its own width, less the band
+  (a bar at the bottom is in the band already), and two rects that
+  meet become their union when that is no more pixels than the two.
+  Per wheel step of 60 px: a 40 px fixed bar at the bottom, 734 rows
+  to 57 (its box and the reach of its glyphs); a 200 px fixed box and
+  a 150 px sticky one, 2 x 734 rows of 1024 px to 64,000 pixels; a
+  sticky header as wide as the view stays what it is going down (its
+  height and shadow, 65 rows on www.slitaz.org: its pixels moved with
+  the page and the page moved under it), and going up no longer paints
+  the band's 60 rows twice (125 rows to 65). CPU of xsoie for 60 wheel
+  steps, 1/100 s: fixed bar 43-50 to 20, sticky header, fixed bar and
+  two narrow boxes together 145-191 to 60-65, www.slitaz.org 59 down
+  as before, 80 to 72 up. Keeping the pixels of an opaque header
+  instead of painting it again would save those rows, but nothing
+  tells cheaply that no box of the page passes over it: not done.
+- The scroll thumb was said to be painted twice per step by xsoie
+  (front.c, the page under where it was): it is once, the second place
+  (overlays()) sees no old thumb after a scroll. Nothing changed.
+- gsoie has the paint check too (SOIE_DEBUG_PAINT, SoieView's
+  redraw()): the view painted whole after each redraw must be the
+  same.
+
+- Late images (those that come after the first paint) each cost a
+  layout and a paint of the whole view, whatever they changed: on
+  soie.slitaz.org, 14 images, 13 layouts and 13 full paints, 11 of
+  them for images below the view whose width and height attributes
+  already gave the box its size. Now the shell hands them to the
+  engine (soie_layout_images(), new in the library): it asks again for the
+  images that were on their way and looks at the boxes that show them.
+  A box keeps its size when the image has the natural size the box was
+  given (its width and height attributes), when the box has a width
+  and a height of its own, or one of them and the same ratio (the
+  attributes' or aspect-ratio's); a flex or grid item is always sized
+  again, their sizes look at the natural ones. Boxes that keep their
+  size are put in the damage, nothing is laid out, and
+  shell_paint_changed() paints their rects if they are in the view:
+  the same page is now 1 layout and 2 partial paints (the logo and the
+  first screenshot), 0.89 s of CPU to 0.32. An image that changes its
+  box lays out as before (the layout is incremental: the ancestors of
+  the image only, replaced_same()), and its damage is the layout's:
+  the rects that moved, no more the whole view.
+- The boxes that show an image: its own (img, input, object, embed),
+  a video's poster, and the layers of background-image and mask-image;
+  an inline box's background damages its block (its fragments are the
+  block's). The root's or body's background is the canvas': all. Below
+  a rotated or scaled ancestor: all (the rect is not where it paints).
+- A paint no longer asks again for an image on its way: only a layout
+  and soie_layout_images() do. A partial paint that took the image
+  when it came showed it in the rect it painted and nowhere else,
+  until the next full paint; and no signature tells an image came
+  (the "DOM stamp of images" is the element's, it does not move when
+  its bytes arrive), so each image has a mark, fresh, from the moment
+  it is taken to the moment its boxes are in the damage; a layout
+  that takes images (a script's getBoundingClientRect()) damages the
+  kept boxes that show them too.
+- The wait between two passes of late resources was 200 ms from the end
+  of the layout: a machine whose pass (layout and paint) takes longer
+  painted back to back while the images came. It is now counted from
+  the end of the paint and is twice what the last pass cost, style,
+  layout and paint, 200 ms at least and 2 s at most. What comes last
+  (nothing else on its way) never waits. Fonts and style sheets that
+  come late restyle and paint all, as before.
+- Found on the way, three places that took the x, y of inline and text
+  boxes for a place. They have none (they lie in their block's
+  fragments; their x, y only add up what moved them):
+  - damage.c united them into each element's rects: every rect of a
+    change reached up to the page's origin (a clock in a span: 640,000
+    pixels painted for a 21,000 pixel line; now the line);
+  - stick_extent() too: a fixed bar at the bottom holding text had the
+    whole view painted at each scroll step (734 rows for a 40 px bar);
+    it now gives its box and its fragments;
+  - overflow_bottom() took them for the page's height: in a box kept
+    from layout to layout they move again each time, and a page with a
+    flex row after a line of images grew 230 px at each late image
+    (blank space to scroll below its end). They are skipped.
+- A rect that is inside one already in the damage is not added: a box
+  that changed where it was gave the same rect twice, old and new, and
+  was painted twice.
+- shell_paint_changed() joins two rects that meet when their union is
+  no more pixels than the two (rect_add(), shell_paint_scroll() too):
+  a layout that moves the page under a late image gave 4 rects, each
+  most of the view, painted one over the other (3 million pixels for
+  a view of 750,000).
+- Measured, loading the local copy of soie.slitaz.org with its images
+  300 ms apart, xsoie: 13 layouts and 15 paints of the whole view,
+  0.80 to 0.89 s of CPU; now 1 layout, 2 paints of a rect (10 passes
+  paint nothing: below the view), 0.29 to 0.32 s. The same final
+  pixels. With the wait counted 12 times longer, as on the Atom, a
+  page of 7 images of unknown size 250 ms apart takes 5 passes
+  instead of 7.
+
+### Compiler flags and gradients
+
+- The pixel loops are built at -O2 -fno-math-errno whatever CFLAGS
+  says (Makefile, FAST_CFLAGS: lib/paint.o, lib/image.o, lib/svg.o;
+  glyphs are blended in paint.c, text.c and font.c have no pixel
+  loop). The SliTaz packages are built with -Os, which kept every
+  `/ 255` of blend() and blend_px() as a division: a viewport of
+  www.slitaz.org painted in 49 ms, 38 with these three files at -O2,
+  for 20 KB of the library (689 to 710 KB stripped). The rest keeps
+  the distribution's -Os. The line is `override CFLAGS +=`: a CFLAGS
+  on make's command line would win over a target's plain +=, and the
+  environment's (what cook exports) works either way; make
+  FAST_CFLAGS= turns it off. Not done: the style code at -O2 (-Os
+  costs it 30 %, spread over all of it: cascade.o and selector.o
+  alone give 5 % back for 20 KB more). On i486 sqrtf() is still a
+  call: under -std=c99 GCC keeps the x87's excess precision out
+  (-fexcess-precision=standard) and does not use fsqrt, with or
+  without errno; -fexcess-precision=fast would, and would change how
+  every float of these files rounds there: to be tried on an i486
+  build with the paint tests, not done.
+- div255() (paint.h): x / 255 as two shifts and two additions,
+  (x + 1 + (x >> 8)) >> 8, the same result as the division for 0 to
+  65534 (a byte times a byte is 65025 at most; tests/unit.c tries
+  them all), so that blends no longer depend on the compiler's -O.
+  blend(), blend_px(), the SVG fill and the gradients use it. On an
+  i486 build blend() goes from 33 cycles a pixel (-Os) or 25 (-O2) to
+  21 and 19: GCC's own multiplication is for signed numbers.
+- QuickJS built from QUICKJS_SRC is compiled at -O2 -fwrapv whatever
+  CFLAGS says, as its own Makefile does (it counts on signed integers
+  that wrap; with the distribution's -Os it got neither). A page's
+  scripts start in 206 ms instead of 261; script.so is 230 KB larger
+  in such a build. The packages link quickjs-dev's library: nothing
+  changes for them.
+
+- A gradient is painted from a table (image.c, grad_table()): its
+  colors along the line, at most 4096 cells of an eighth of a pixel
+  or more, filled when a pixel first falls in them (a 60 px band of
+  a 4000 px gradient computes the cells it crosses: 0.05 ms, 0.54
+  before the table). A pixel
+  is then an index and a store (alpha 255, no mask) or an integer
+  blend, where it was stop_color() and four float to int conversions:
+  74 cycles a pixel on an i486 build, 12 to 15 now (7 opaque). The
+  index is fixed point, 32.32 in 64 bits (the cell is the high word
+  on a 32-bit machine): one addition a pixel for a linear gradient;
+  a radial one is indexed by the square of the distance, whose second
+  difference is constant: two additions and no square root (a table
+  along the distance with sqrtf() per pixel: 17 to 20 cycles on the
+  same bench with fsqrt inline, and the i486 package would call it).
+  A repeating linear gradient has a period in a power of two of cells
+  and the index wraps. A vertical gradient is one color per row (its
+  rows are filled).
+- What the table may not change: a cell's pixels take its color only
+  when the cell is even (no stop in it or next to it, the same alpha
+  and colors one level apart at most over the cell and its two
+  neighbours); the others are computed as before, pixel by pixel
+  (grad_exact()). So hard stops are as sharp as they were and at the
+  same pixels, steep gradients are unchanged, and the result is
+  within one level per channel of the old one, also under several
+  translucent layers (with the same alpha a level below or in the
+  color stays a level; a level of alpha would add up, hence the same
+  alpha). The neighbours count because the fixed point index may be a
+  cell away from the floats of the exact path; when those floats get
+  coarser than a cell (past 32768 px down a page for cells of 1/8 px)
+  the whole tile is exact. Compared with the old code on 860 pages of
+  random gradients (kinds, angles, stops with alpha, hard stops,
+  hints, repeating, sizes, tiles, rounded clips, opacity, RGBA and
+  BGRA, scrolled): 1 level at most, on 0.15 % of the bytes; the three
+  slitaz.org pages are identical. No banding: the table follows the
+  8-bit steps of the old code, moved by less than a cell.
+- A pixel of the page gets the same bytes from a gradient whatever
+  is painted of it: the whole page, the band a scroll brought in, a
+  rectangle of a video (the paint tests compare bands with the whole
+  byte for byte, scrolling keeps the old pixels). So nothing of the
+  table looks at the canvas: the number of cells and what each one
+  is (even, exact) come from the gradient alone; exact or not far
+  down a page from the tile's place; a pixel's index from its place
+  in the tile: a row starts from the tile's first column and reaches
+  the clip's first pixel by the n additions it is away, done as one
+  multiplication (whole numbers of 64 bits: the same result to the
+  bit); a vertical gradient's row takes the cell of that first
+  column. A first version sized the table by the pixels to paint and
+  started rows at the clip: bands were a level off the whole.
+  Checked on 400 pages of random gradients, each painted whole, in
+  16 px bands, in 1 px bands, in 40 random rectangles and scrolled,
+  RGBA and BGRA: no byte differs.
+- Tiles are placed by their number from the positioning area, in
+  doubles (tiles(): *org + k * step), not by counting floats from the
+  first tile painted: a repeated background (gradient or image) whose
+  tiles end on half pixels was not the same in a band and in the
+  whole page (55 of those 400 pages with the old code, 0 now). This
+  moves some tile edges by a pixel from where the whole page had
+  them: 19 of the 860 pages differ from the old code by more than a
+  level there, none without this change.
+- Without a table, as before: conic gradients, repeating radial ones,
+  radial ones whose last stop is under 1 px, repeating linear ones
+  with a period under 1 px. A gradient
+  whose color and alpha both change is exact where they change
+  together (a 45 degree one over 1000 px: 4.5 ms instead of 1.4, 21
+  before).
+- Known and kept: a hard stop that falls exactly on a row's centre in
+  a vertical gradient (linear-gradient(red 50%, blue 50%) on a box
+  25 px high) splits that row in two colors: sinf() of 180 degrees in
+  floats is -8.7e-8, not 0, and t leans to one side then the other
+  along the row. The table reproduces it (those pixels are exact).
+  The fix is to give the four straight angles their exact direction
+  in gradient_parse(); it changes pixels, so it is for a change of
+  its own with its test.
+
+### Video
+
+- Frames are made for the page: the engine tells the extension the
+  size its box shows them at, in pixels, and the byte order of its
+  canvas (`frame_for`, ext ABI 0.2), and the decoding thread converts
+  to that, once (swscale, fast bilinear), 1280x720 at most as before:
+  four waiting frames and the one on screen cost under 20 MB, 10 MB
+  for a 960 px box. Painting such a frame is a copy by rows
+  (draw_image(): an opaque image in the canvas' order at its own size
+  on whole pixels; the pixels under the edge of a rounded mask alone
+  are blended). The frame is placed on whole pixels, as browsers do.
+  The intrinsic size stays the video's (the state's width and height).
+- The page under a frame is not painted: soie_paint() looks for a
+  video whose opaque frame fills part of the canvas (paint(),
+  covered()) and paints that part alone, in three rects clear of the
+  box's round corners (the rows between them, and between the corners
+  of the top and bottom rows), with `cover` set in the canvas: fills,
+  rounded fills, shadows, texts, images, background layers, SVG and
+  transformed subtrees return at once until paint_media() of that box
+  comes, checks that nothing is in the way (the clip is the whole
+  canvas, no mask, opacity 1, the frame's rect holds the canvas, the
+  canvas is the page's and not a transform's or a mask's buffer) and
+  clears it. What is painted after (controls, boxes over the video)
+  is painted as ever. Still set when the walk ends (a clip, a mask, an
+  opacity, a transform, a box never reached): that rect is painted
+  again without it, so a wrong guess costs a walk, never a pixel.
+  Then the rest of the canvas by bands around these rects: the four
+  corners when the canvas is the video's box. round_push() pushes no
+  mask when the clip is inside the rounded rect and reaches none of
+  its corner squares (every pixel would weigh 255): the frame parts,
+  and any band of a tall rounded box, an image, an overflow clip.
+- soie_media_tick_rect() gives the players' content boxes, not their
+  border boxes: frames and controls change nothing else. A frame and
+  the controls are asked once per soie_paint() call (the extension
+  may give another frame at each call, the parts of one paint show
+  the same).
+- The tick comes when the next frame is due (`next_frame`, 1 to 20
+  ms), not every 20 ms: 60 frames a second show as 60 (a 50 Hz tick
+  dropped one in six after converting it), 24 cost 24 paints. The
+  fronts take the time they spent painting off the wait the tick
+  asked for (front_tick(), SoieView's tick()): it was counted before
+  the paint, a frame painted in 15 ms made the next one 15 ms late.
+- Measured (i7, 1024x560 view, the 1920x1080 60 fps H.264 High clip of
+  pelote in a 960 px rounded bordered box, 10 s): main thread 5.6 s
+  of CPU to 0.6 s, 25.7 ms a paint to 0.9 ms; decoding thread 2.8 s
+  to 1.8 s (frames converted to 960x540, none converted for nothing);
+  217 frames shown of 603 decoded, then 597 of 604. In xsoie: 5.0 s
+  and 3.0 s to 0.5 s and 2.2 s.
+- A machine too slow plays in time, with fewer frames (ext/media.c,
+  "Keeping up"): a frame out of the decoder after its time is not
+  converted (four a second are, the picture moves); late frames in a
+  row whose lag does not shrink, or an underrun of the sound card
+  (with sound the clock is the card's and stops with it: nothing is
+  ever late then) make the decoder skip more: level 1 no loop filter
+  and no frames nothing refers to (40% of the decoding time of that
+  clip, 31 fps), 2 no B-frames (27%, 17 fps), 3 key frames only (the
+  sound at least). A level down after 4 s without a late frame when
+  the thread mostly waited (65% of the time from level 1, 45% from 2
+  and 3); back up within twice that time and the next try waits
+  twice as long, up to 64 s. Frames converted and never shown (the
+  page's thread paints fewer than come: a quarter of them, three
+  half seconds in a row, some shown in each) make the decoder convert
+  one frame in 2, 3... 8, and all again by the same patience; a busy
+  moment of the page (nothing shown at all) is not that.
+- The decoding thread no longer waits for the page to take frames it
+  would drop: with four frames waiting it drops the oldest as soon as
+  the one after it is due too (what advance() does when the page
+  comes). It used to wait there: a page busy for longer than the
+  sound decoded ahead (about 0.1 s with 60 fps video: four frames,
+  the card's buffer) had its sound cut, and the clock with it. During
+  a 1.5 s stall of the main thread 1 frame was decoded, now 90.
+  frames skipped inside the decoder are counted decoded and dropped
+  (getVideoPlaybackQuality(): players step down on them).
+- `SOIE_MEDIA_SLOW=N` burns N ms per decoded video frame and makes a
+  player say on stderr, when it closes, what it decoded, converted and
+  dropped and the levels it reached (N may be 0): how the above was
+  tested on a fast machine. With 30 ms per frame (and 10 ms burnt per
+  paint) the clip plays in time at level 2, 320 frames converted of
+  1219 in 20 s; with 25 ms per paint alone, one frame in two, 34
+  paints a second; on a sixth of one core (five busy loops pinned
+  with it) 30 frames a second at level 1, where 0.1.8 showed 4.
+- file:// answers Range (fetch_file(): bytes=from-to, 206 and
+  content-range): the player's 1 MB reads work on local files, which
+  were read whole (and refused over 256 MB). A 290 MB film plays in
+  79 MB.
+- Not done: thread_count stays 1. Two frame threads decode that clip
+  1.28 times faster for 1.31 times the CPU on idle cores, and slower
+  than one (3.87 s against 3.32 s) on two busy ones: no gain where it
+  matters. A poster made of the first frame for preload=metadata (a
+  player would have to open at load, decode one frame and stop: the
+  page of videos that stays a page).
+
+- ABI 0.2 (media): `frame_for` and `next_frame` appended to
+  `soie_ext_media`, SOIE_FRAME_BGRA and SOIE_FRAME_OPAQUE. A 0.1
+  media.so in a 0.2 engine has neither (SOIE_EXT_HOOK reads NULL past
+  its size): frames come from frame(), RGBA at the video's size,
+  scaled and blended as before, ticks every 20 ms. A 0.2 media.so in
+  a 0.1 engine is asked frame() only and answers the same. Both ways
+  tested.
+
+  own (opaque frames, translucent ones, an extension without
+  frame_for): 17 pages (boxes over and under the video, object-fit,
+  rounded clips, opacity, transforms, overflow, clip-path, mask-image,
+  clip) painted whole against 16 px bands, where no cover is taken,
+  byte for byte, RGBA against BGRA, and rects; and the cover must be
+  taken where it can be, not where something is in the way
+  (paint_covered, a counter for the test).
+
 
 ## Character encoding
 
