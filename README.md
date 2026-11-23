@@ -66,7 +66,7 @@ also satisfy the selected libraries' own requirements.
 | GLib / GObject / GIO | GTK frontend, supplied through GTK's pkg-config dependencies | 2.36 (`g_unix_fd_add`); GTK may require newer | Not established |
 | Cairo | GTK frontend drawing, supplied through GTK's pkg-config dependencies | 1.14 (`cairo_surface_set_device_scale`) | Not established |
 | libwebp | Optional `ext/webp.so` | 0.5.0 (`WebPFree`) | Not established |
-| FFmpeg (`libavformat`, `libavcodec`, `libswscale`, `libswresample`, `libavutil`) | Optional `ext/media.so` | 3.4 API floor (`avio_context_free`, libavformat 57.80.100) | 6.1.x release series; FFmpeg 7.0+ removes the legacy channel layout/resampler APIs used here |
+| FFmpeg (`libavformat`, `libavcodec`, `libswscale`, `libswresample`, `libavutil`) | Optional `ext/media.so` | 3.4 API floor (`avio_context_free`, libavformat 57.80.100) | Not established; build and local media tests pass with 9.0.2 |
 | ALSA (`alsa`) | Optional `ext/media.so`, including builds played silently | 1.0.11 (`snd_pcm_set_params`, `snd_pcm_recover`) | Not established |
 | QuickJS | Optional `ext/script.so` | Target release: 2026-06-04 | Only 2026-06-04 is targeted; compatibility with other releases is not established |
 | System C/POSIX libraries (`libc`, `libm`, `libdl`, pthreads) | Core and browser/extension support | C99 and POSIX.1-2008 interfaces; no implementation-specific minimum established | Not established |
@@ -74,6 +74,13 @@ also satisfy the selected libraries' own requirements.
 
 `browser/xsoie` is built and installed only when pkg-config finds
 `x11`, `xext`, `gnutls`, `zlib` and `libpng`.
+
+The media extension selects FFmpeg APIs at compile time: newer releases
+use `AVFrame.duration`, `AVChannelLayout` and `swr_alloc_set_opts2`, while
+older releases retain the legacy duration and resampler APIs. Use headers
+and libraries from the same FFmpeg release, and rebuild `ext/media.so`
+after an FFmpeg ABI upgrade. The legacy path also passes a compile check
+against FFmpeg 4.4.6 headers; playback on that version has not been tested.
 
 The optional Wayland frontend also needs `wayland-scanner` and
 `wayland-protocols` at build time. The latter needs version 1.26 for
